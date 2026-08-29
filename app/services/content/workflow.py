@@ -1,0 +1,59 @@
+from app.models.content import (
+    BlogStatus,
+    ContentProject,
+    ContentProjectCreate,
+    GhostStatus,
+)
+from app.services.content.blog_generator import BlogGenerator
+from app.services.content.store import ContentStore
+from app.services.publishers.base import DraftPublisher
+
+
+class ContentWorkflow:
+    def __init__(
+        self,
+        store: ContentStore | None = None,
+        blog_generator: BlogGenerator | None = None,
+    ):
+        self.store = store or ContentStore()
+        self.blog_generator = blog_generator or BlogGenerator()
+
+    def create_project(self, request: ContentProjectCreate) -> ContentProject:
+        return self.store.save(ContentProject(**request.model_dump()))
+
+    def generate_blog(self, project_id: str) -> ContentProject:
+        project = self.store.get(project_id)
+        project.blog_status = BlogStatus.generating
+        project.last_error = None
+        self.store.save(project)
+        try:
+            project.blog_output = self.blog_generator.generate(project)
+            project.blog_status = BlogStatus.draft_complete
+            project.ghost_status = GhostStatus.ready
+        except Exception as exc:
+            project.blog_status = BlogStatus.failed
+            project.last_error = str(exc)
+            self.store.save(project)
+            raise
+        return self.store.save(project)
+
+    def sync_ghost_draft(
+        self, project_id: str, publisher: DraftPublisher
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        if project.blog_output is None:
+            raise ValueError("generate a blog draft before creating a Ghost draft")
+        project.ghost_status = GhostStatus.publishing
+        project.last_error = None
+        self.store.save(project)
+        try:
+            project.ghost_publication = publisher.sync_draft(
+                project.blog_output, project.ghost_publication
+            )
+            project.ghost_status = GhostStatus.draft_created
+        except Exception as exc:
+            project.ghost_status = GhostStatus.failed
+            project.last_error = str(exc)
+            self.store.save(project)
+            raise
+        return self.store.save(project)

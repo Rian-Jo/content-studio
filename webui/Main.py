@@ -890,7 +890,9 @@ def _open_task_path(task_path):
         return
     if _is_headless_server():
         # storage 目录通常以卷挂载映射回宿主机，提示相对路径即可定位文件。
-        rel_path = os.path.relpath(normalized_path, os.path.dirname(tasks_root))
+        rel_path = os.path.relpath(
+            normalized_path, os.path.dirname(tasks_root)
+        ).replace("\\", "/")
         st.toast(f"{tr('Open Task Folder')}: ./storage/{rel_path}", icon="📂")
         return
     webbrowser.open(f"file://{normalized_path}")

@@ -1,0 +1,125 @@
+import os
+
+from fastapi import Depends, Query, Request
+
+from app.controllers import base
+from app.controllers.v1.base import new_router
+from app.models.content import (
+    ContentProjectCreate,
+    ContentProjectListResponse,
+    ContentProjectResponse,
+)
+from app.models.exception import HttpException
+from app.services.content import ContentWorkflow
+from app.services.content.store import ContentProjectNotFoundError
+from app.services.publishers import GhostPublisher, GhostPublisherConfig
+from app.utils import utils
+
+
+router = new_router(dependencies=[Depends(base.verify_token)])
+_workflow: ContentWorkflow | None = None
+
+
+def get_workflow() -> ContentWorkflow:
+    global _workflow
+    if _workflow is None:
+        _workflow = ContentWorkflow()
+    return _workflow
+
+
+def _not_found(request: Request, project_id: str) -> HttpException:
+    return HttpException(
+        task_id=base.get_task_id(request),
+        status_code=404,
+        message=f"content project not found: {project_id}",
+    )
+
+
+@router.post(
+    "/content/projects",
+    response_model=ContentProjectResponse,
+    summary="Create a content project",
+)
+def create_content_project(request: Request, body: ContentProjectCreate):
+    project = get_workflow().create_project(body)
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+@router.get(
+    "/content/projects",
+    response_model=ContentProjectListResponse,
+    summary="List content projects",
+)
+def list_content_projects(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    projects = get_workflow().store.list(limit=limit, offset=offset)
+    return utils.get_response(
+        200, {"projects": [project.model_dump(mode="json") for project in projects]}
+    )
+
+
+@router.get(
+    "/content/projects/{project_id}",
+    response_model=ContentProjectResponse,
+    summary="Get a content project",
+)
+def get_content_project(request: Request, project_id: str):
+    try:
+        project = get_workflow().store.get(project_id)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/blog",
+    response_model=ContentProjectResponse,
+    summary="Generate a blog draft for a content project",
+)
+def generate_blog_draft(request: Request, project_id: str):
+    try:
+        project = get_workflow().generate_blog(project_id)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/ghost-draft",
+    response_model=ContentProjectResponse,
+    summary="Create or update a Ghost draft",
+)
+def sync_ghost_draft(request: Request, project_id: str):
+    admin_url = os.getenv("GHOST_ADMIN_URL", "").strip()
+    admin_api_key = os.getenv("GHOST_ADMIN_API_KEY", "").strip()
+    if not admin_url or not admin_api_key:
+        raise HttpException(
+            task_id=base.get_task_id(request),
+            status_code=503,
+            message=(
+                "Ghost draft publishing is not configured; set GHOST_ADMIN_URL "
+                "and GHOST_ADMIN_API_KEY on the server"
+            ),
+        )
+    try:
+        publisher = GhostPublisher(
+            GhostPublisherConfig(
+                admin_url=admin_url,
+                admin_api_key=admin_api_key,
+                api_version=os.getenv("GHOST_ADMIN_API_VERSION", "v6.0"),
+            )
+        )
+        project = get_workflow().sync_ghost_draft(project_id, publisher)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))

@@ -1,3 +1,72 @@
+# Content Studio
+
+Content Studio is a public fork of
+[harry0703/MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo).
+It preserves MoneyPrinterTurbo's existing video pipeline and MIT license while
+adding a content-project layer for independent channel workflows.
+
+> **Direction: an integrated product with separated pipelines**<br>
+> **방향: 통합된 제품, 분리된 파이프라인**
+
+The product is designed so that blog and video work can share one content project
+without turning into one failure-prone serial pipeline. A channel can retain its
+own output and status even when another channel has not started or has failed.
+
+## Implemented in the current MVP
+
+- `ContentProject` and `BlogOutput` domain models
+- Local SQLite project-state storage
+- An independent `BlogWorkflow` that does not require video generation
+- A server-side Ghost Admin API integration limited to creating or updating drafts
+- A dedicated Streamlit Content Studio screen
+- REST endpoints for creating, listing, reading, and generating content projects
+
+The following roadmap items are **not implemented yet**: research and EvidencePack
+generation, source verification, blog/video fan-out, the MoneyPrinterTurbo video
+adapter, newsletter and social workflows, unified publishing approval, and
+post-publication analytics.
+
+## Run Content Studio locally
+
+The verified local project path is `D:\second_life\content-studio`.
+
+```powershell
+cd D:\second_life\content-studio
+uv sync --frozen
+uv run streamlit run webui\ContentStudio.py
+```
+
+Blog generation uses the LLM provider configured locally for MoneyPrinterTurbo.
+The local `config.toml`, generated content, SQLite state, logs, caches, and virtual
+environment are excluded from Git.
+
+## Optional Ghost draft integration
+
+Ghost credentials are read only from server-side environment variables:
+
+```powershell
+$env:GHOST_ADMIN_URL="https://your-admin-domain.example"
+$env:GHOST_ADMIN_API_KEY="<integration-id>:<hex-secret>"
+$env:GHOST_ADMIN_API_VERSION="v6.0"
+```
+
+The current integration supports **draft create/update only**. It does not expose
+automatic public publishing. The Admin API key is not stored in project records,
+SQLite payloads, the WebUI state, or the repository. See
+[Content Studio MVP documentation](docs/content-studio.md) for details.
+
+## Verification
+
+```powershell
+uv run --frozen ruff check app test webui
+uv run --frozen pytest -q
+```
+
+The original MoneyPrinterTurbo documentation is retained below for upstream usage,
+credits, and compatibility information.
+
+---
+
 <div align="center">
 
 # MoneyPrinterTurbo 💸
