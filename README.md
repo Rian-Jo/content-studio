@@ -25,6 +25,9 @@ own output and status even when another channel has not started or has failed.
   terms to the existing MoneyPrinterTurbo task queue
 - Per-channel status and LLM request records, plus deterministic claim/number
   consistency checks across blog and video drafts
+- A unified manual review record bound to the exact evidence/output snapshot with
+  SHA-256, quality-warning acknowledgement, and change-request notes
+- Automatic approval invalidation when a reviewed output is regenerated or changes
 - A server-side Ghost Admin API integration limited to creating or updating drafts
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
@@ -34,7 +37,8 @@ the current research step verifies URLs supplied by the user. Exact token and co
 amounts remain unavailable when the configured LLM adapter does not report usage;
 Content Studio records this explicitly instead of inventing an estimate. Other
 roadmap items not implemented yet are long-video profiles, newsletter and social
-workflows, unified publishing approval, and post-publication analytics.
+workflows, public or scheduled publishing, external video publishing, and
+post-publication analytics.
 
 ## Run Content Studio locally
 
@@ -59,7 +63,8 @@ Create project
   -> review and approve the EvidencePack
   -> independently generate a blog draft and/or MPT short video
   -> review channel status and the consistency report
-  -> optionally synchronize a Ghost draft
+  -> approve the exact output snapshot or request changes
+  -> optionally synchronize an approved blog to a Ghost draft
 ```
 
 Private, loopback, link-local, and credential-bearing source URLs are rejected.
@@ -67,6 +72,10 @@ Source text is treated as untrusted reference data, not as LLM instructions.
 Content Studio video jobs always disable MoneyPrinterTurbo cross-posting, even if
 automatic upload is configured elsewhere. Rendering can still use the configured
 LLM, TTS, and material-provider APIs and may incur their normal costs.
+
+Approval does not publish content. It unlocks only explicitly supported downstream
+actions. At present, that means creating or updating a Ghost **draft**. Public Ghost
+publishing, scheduling, and external video publishing remain unavailable.
 
 ## Optional Ghost draft integration
 

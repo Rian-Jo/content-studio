@@ -9,6 +9,7 @@ from app.models.content import (
     ContentFanoutRequest,
     ContentProject,
     ContentProjectCreate,
+    ContentReviewRequest,
     GhostStatus,
     LLMUsageRecord,
     VideoStatus,
@@ -19,6 +20,7 @@ from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher
+from app.services.content.review import ContentReviewService
 from app.services.content.store import ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter, VideoGenerator
 from app.services.publishers.base import DraftPublisher
@@ -33,6 +35,7 @@ class ContentWorkflow:
         evidence_builder: EvidenceBuilder | None = None,
         video_generator: VideoGenerator | None = None,
         consistency_checker: ContentConsistencyChecker | None = None,
+        review_service: ContentReviewService | None = None,
     ):
         self.store = store or ContentStore()
         self.blog_generator = blog_generator or BlogGenerator()
@@ -40,6 +43,7 @@ class ContentWorkflow:
         self.evidence_builder = evidence_builder or EvidenceBuilder()
         self.video_generator = video_generator or MoneyPrinterVideoAdapter()
         self.consistency_checker = consistency_checker or ContentConsistencyChecker()
+        self.review_service = review_service or ContentReviewService()
 
     def create_project(self, request: ContentProjectCreate) -> ContentProject:
         return self.store.save(ContentProject(**request.model_dump()))
@@ -89,6 +93,7 @@ class ContentWorkflow:
             or project.evidence_pack is None
         ):
             raise ValueError("approve an EvidencePack before generating a blog draft")
+        self.review_service.invalidate(project, "blog output generation started")
         project.blog_status = BlogStatus.generating
         project.last_error = None
         project.channel_runs[ContentChannel.blog.value] = ChannelRunRecord(
@@ -137,13 +142,17 @@ class ContentWorkflow:
         ):
             raise ValueError("approve an EvidencePack before running channel fan-out")
 
+        previous_channels = list(project.requested_channels)
         project.requested_channels = request.channels
         project.last_error = None
         operations = {}
         snapshot = project.model_copy(deep=True)
         started_at = utc_now()
 
-        if ContentChannel.blog in request.channels and project.blog_output is None:
+        should_generate_blog = ContentChannel.blog in request.channels and (
+            project.blog_output is None or request.regenerate
+        )
+        if should_generate_blog:
             project.blog_status = BlogStatus.generating
             project.channel_runs[ContentChannel.blog.value] = ChannelRunRecord(
                 status=ChannelRunStatus.running,
@@ -156,11 +165,26 @@ class ContentWorkflow:
             )
 
         video_active = project.video_status in {
+            VideoStatus.planning,
             VideoStatus.queued,
             VideoStatus.rendering,
-            VideoStatus.complete,
         }
-        if ContentChannel.short_video in request.channels and not video_active:
+        if (
+            ContentChannel.short_video in request.channels
+            and request.regenerate
+            and video_active
+        ):
+            raise ValueError("an active video task cannot be regenerated")
+        should_generate_video = (
+            ContentChannel.short_video in request.channels
+            and not video_active
+            and (
+                project.video_output is None
+                or project.video_status == VideoStatus.failed
+                or request.regenerate
+            )
+        )
+        if should_generate_video:
             project.video_status = VideoStatus.planning
             project.channel_runs[ContentChannel.short_video.value] = ChannelRunRecord(
                 status=ChannelRunStatus.running,
@@ -172,9 +196,14 @@ class ContentWorkflow:
                 (snapshot, request.video_options),
             )
 
+        if operations or previous_channels != request.channels:
+            self.review_service.invalidate(
+                project, "channel selection or output generation changed"
+            )
         self.store.save(project)
         if not operations:
-            project.consistency_report = self.consistency_checker.check(project)
+            if previous_channels != request.channels:
+                project.consistency_report = self.consistency_checker.check(project)
             return self.store.save(project)
 
         with ThreadPoolExecutor(max_workers=len(operations)) as executor:
@@ -216,6 +245,8 @@ class ContentWorkflow:
         project = self.store.get(project_id)
         if project.video_output is None:
             raise ValueError("start a video channel before refreshing its status")
+        previous_status = project.video_status
+        previous_output = project.video_output.model_dump(mode="json")
         status, output, error = self.video_generator.refresh(project.video_output)
         project.video_status = status
         project.video_output = output
@@ -233,7 +264,19 @@ class ContentWorkflow:
                 run.status = ChannelRunStatus.queued
         if error:
             project.last_error = f"short_video: {error}"
-        project.consistency_report = self.consistency_checker.check(project)
+        output_changed = output.model_dump(mode="json") != previous_output
+        if output_changed:
+            self.review_service.invalidate(project, "video output changed")
+        if output_changed or status != previous_status:
+            project.consistency_report = self.consistency_checker.check(project)
+        return self.store.save(project)
+
+    def review_project(
+        self, project_id: str, request: ContentReviewRequest
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.review_service.review(project, request)
+        project.last_error = None
         return self.store.save(project)
 
     def sync_ghost_draft(
@@ -242,6 +285,9 @@ class ContentWorkflow:
         project = self.store.get(project_id)
         if project.blog_output is None:
             raise ValueError("generate a blog draft before creating a Ghost draft")
+        self.review_service.require_current_channel_approval(
+            project, ContentChannel.blog
+        )
         project.ghost_status = GhostStatus.publishing
         project.last_error = None
         self.store.save(project)

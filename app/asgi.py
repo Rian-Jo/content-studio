@@ -54,10 +54,19 @@ def exception_handler(request: Request, e: HttpException):
 
 
 def validation_exception_handler(request: Request, e: RequestValidationError):
+    errors = []
+    for validation_error in e.errors():
+        sanitized_error = dict(validation_error)
+        context = sanitized_error.get("ctx")
+        if isinstance(context, dict):
+            sanitized_error["ctx"] = {
+                key: str(value) for key, value in context.items()
+            }
+        errors.append(sanitized_error)
     return JSONResponse(
         status_code=400,
         content=utils.get_response(
-            status=400, data=e.errors(), message="field required"
+            status=400, data=errors, message="field required"
         ),
     )
 

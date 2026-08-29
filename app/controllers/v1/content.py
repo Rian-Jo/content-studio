@@ -9,6 +9,7 @@ from app.models.content import (
     ContentProjectCreate,
     ContentProjectListResponse,
     ContentProjectResponse,
+    ContentReviewRequest,
 )
 from app.models.evidence import EvidenceApprovalRequest, ResearchRequest
 from app.models.exception import HttpException
@@ -140,6 +141,25 @@ def run_content_fanout(
 def refresh_content_video(request: Request, project_id: str):
     try:
         project = get_workflow().refresh_video(project_id)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/review",
+    response_model=ContentProjectResponse,
+    summary="Approve outputs or request changes after manual review",
+)
+def review_content_project(
+    request: Request, project_id: str, body: ContentReviewRequest
+):
+    try:
+        project = get_workflow().review_project(project_id, body)
     except ContentProjectNotFoundError as exc:
         raise _not_found(request, project_id) from exc
     except ValueError as exc:

@@ -12,11 +12,14 @@ from app.models.content import (
     ChannelRunRecord,
     ChannelRunStatus,
     ConsistencyStatus,
+    ContentChannel,
     ContentFanoutRequest,
     ContentProject,
     ContentProjectCreate,
+    ContentReviewRequest,
     GhostPublication,
     GhostStatus,
+    ReviewDecision,
     VideoGenerationOptions,
     VideoOutput,
     VideoStatus,
@@ -503,6 +506,12 @@ class TestContentWorkflow(unittest.TestCase):
         self.assertEqual(generated.blog_status, BlogStatus.draft_complete)
         self.assertEqual(generated.ghost_status, GhostStatus.ready)
 
+        reviewed = self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        self.assertEqual(reviewed.approval_status, "approved")
+
         synced = self.workflow.sync_ghost_draft(project.project_id, FakePublisher())
 
         self.assertEqual(synced.blog_status, BlogStatus.draft_complete)
@@ -608,6 +617,102 @@ class TestContentWorkflow(unittest.TestCase):
         self.assertEqual(refreshed.video_status, VideoStatus.complete)
         self.assertEqual(refreshed.video_output.rendered_files, ["final.mp4"])
         self.assertEqual(refreshed.blog_status, BlogStatus.draft_complete)
+
+    def test_review_waits_for_selected_video_to_complete(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        result = self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["blog", "short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "video channel is not ready"):
+            self.workflow.review_project(
+                result.project_id,
+                ContentReviewRequest(decision=ReviewDecision.approve),
+            )
+
+        self.workflow.refresh_video(result.project_id)
+        reviewed = self.workflow.review_project(
+            result.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        self.assertEqual(reviewed.approval_status, "approved")
+        self.assertEqual(len(reviewed.review_record.snapshot_sha256), 64)
+        refreshed_again = self.workflow.refresh_video(result.project_id)
+        self.assertTrue(
+            self.workflow.review_service.is_current_approval(refreshed_again)
+        )
+
+    def test_quality_warning_requires_explicit_acknowledgement(self):
+        project = approved_project()
+        project.requested_channels = [
+            ContentChannel.blog,
+            ContentChannel.short_video,
+        ]
+        project.blog_output = BlogOutput.model_validate(sample_blog_payload())
+        project.blog_output.markdown += "\n\nAn unsupported result claims 99 percent."
+        project.blog_status = BlogStatus.draft_complete
+        project.video_output = VideoOutput.model_validate(sample_video_payload())
+        project.video_output.task_id = "mpt-video-1"
+        project.video_status = VideoStatus.complete
+        project.consistency_report = ContentConsistencyChecker().check(project)
+        self.workflow.store.save(project)
+
+        with self.assertRaisesRegex(ValueError, "acknowledge quality warnings"):
+            self.workflow.review_project(
+                project.project_id,
+                ContentReviewRequest(decision=ReviewDecision.approve),
+            )
+
+        reviewed = self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(
+                decision=ReviewDecision.approve,
+                acknowledge_quality_warnings=True,
+            ),
+        )
+        self.assertTrue(reviewed.review_record.quality_warnings_acknowledged)
+
+    def test_regeneration_invalidates_previous_approval(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        approved = self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        self.assertEqual(approved.approval_status, "approved")
+
+        regenerated = self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(channels=["blog"], regenerate=True),
+        )
+
+        self.assertEqual(regenerated.approval_status, "waiting_for_review")
+        self.assertIsNotNone(regenerated.review_record.invalidated_at)
+
+    def test_ghost_sync_rejects_changed_snapshot(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        changed = self.workflow.store.get(project.project_id)
+        changed.blog_output.title = "Changed after approval"
+        self.workflow.store.save(changed)
+
+        with self.assertRaisesRegex(ValueError, "current output snapshot"):
+            self.workflow.sync_ghost_draft(project.project_id, FakePublisher())
+
+    def test_request_changes_requires_review_note(self):
+        with self.assertRaisesRegex(ValueError, "review note"):
+            ContentReviewRequest(decision=ReviewDecision.request_changes)
 
 
 if __name__ == "__main__":

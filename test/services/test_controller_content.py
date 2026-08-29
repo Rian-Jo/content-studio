@@ -108,6 +108,10 @@ class TestContentControllerHTTP(unittest.TestCase):
         refreshed = self.client.post(
             f"/api/v1/content/projects/{project_id}/video/refresh"
         )
+        reviewed = self.client.post(
+            f"/api/v1/content/projects/{project_id}/review",
+            json={"decision": "approve"},
+        )
 
         self.assertEqual(fanout.status_code, 200)
         self.assertEqual(fanout.json()["data"]["video_status"], "queued")
@@ -116,6 +120,20 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.assertEqual(
             refreshed.json()["data"]["blog_status"], "draft_complete"
         )
+        self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(reviewed.json()["data"]["approval_status"], "approved")
+
+    def test_request_changes_requires_note(self):
+        project = self.workflow.create_project(
+            ContentProjectCreate(topic="Review validation")
+        )
+
+        response = self.client.post(
+            f"/api/v1/content/projects/{project.project_id}/review",
+            json={"decision": "request_changes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
 
     def test_missing_ghost_environment_never_calls_external_publisher(self):
         project = self.workflow.create_project(

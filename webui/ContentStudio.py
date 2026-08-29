@@ -14,8 +14,12 @@ sys.path.insert(0, str(root_dir))
 
 from app.config import config  # noqa: E402
 from app.models.content import (  # noqa: E402
+    ApprovalStatus,
+    ContentChannel,
     ContentFanoutRequest,
     ContentProjectCreate,
+    ContentReviewRequest,
+    ReviewDecision,
     VideoGenerationOptions,
     VideoStatus,
 )
@@ -173,6 +177,11 @@ with left:
             "영상 생성 시 설정된 LLM·TTS·소재 API 비용이 발생할 수 있음을 확인했습니다.",
             disabled=not video_selected,
         )
+        regenerate = st.checkbox(
+            "선택 채널의 기존 결과를 재생성",
+            value=project.approval_status == ApprovalStatus.changes_requested,
+            help="재생성하면 기존 결과에 대한 승인이 자동으로 무효화됩니다.",
+        )
         fanout = st.form_submit_button(
             "선택 채널 생성",
             type="primary",
@@ -194,6 +203,7 @@ with left:
                 video_aspect=video_aspect,
                 voice_name=voice_name.strip(),
             ),
+            regenerate=regenerate,
         )
         with st.spinner("선택한 채널을 독립적으로 실행하고 있습니다..."):
             try:
@@ -223,9 +233,15 @@ with left:
             )
 
     ghost_ready = bool(os.getenv("GHOST_ADMIN_URL") and os.getenv("GHOST_ADMIN_API_KEY"))
+    current_approval = workflow().review_service.is_current_approval(project)
+    blog_approved = bool(
+        current_approval
+        and project.review_record
+        and ContentChannel.blog in project.review_record.reviewed_channels
+    )
     confirm_ghost = st.checkbox(
-        "Ghost 외부 초안을 생성/갱신하는 작업임을 확인했습니다.",
-        disabled=not ghost_ready or project.blog_output is None,
+        "승인된 블로그를 Ghost 외부 초안으로 생성/갱신함을 확인했습니다.",
+        disabled=not ghost_ready or not blog_approved,
     )
     if st.button(
         "Ghost 초안으로 보내기",
@@ -249,10 +265,18 @@ with left:
                 st.rerun()
     if not ghost_ready:
         st.caption("Ghost 연동은 서버 환경변수 설정 후 활성화됩니다.")
+    elif not blog_approved:
+        st.caption("현재 결과 스냅샷을 승인한 후 Ghost 초안을 동기화할 수 있습니다.")
 
 with right:
-    evidence_tab, blog_tab, video_tab, quality_tab = st.tabs(
-        ["Research & Evidence", "블로그 미리보기", "영상", "일관성 검사"]
+    evidence_tab, blog_tab, video_tab, quality_tab, review_tab = st.tabs(
+        [
+            "Research & Evidence",
+            "블로그 미리보기",
+            "영상",
+            "일관성 검사",
+            "Review & Approve",
+        ]
     )
     with evidence_tab:
         if project.evidence_pack:
@@ -343,3 +367,96 @@ with right:
         else:
             st.info("블로그와 영상 결과가 모두 준비되면 검사가 실행됩니다.")
         st.json(report.model_dump(mode="json"))
+
+    with review_tab:
+        st.subheader("통합 검토")
+        requested = set(project.requested_channels)
+        readiness = {
+            "blog": (
+                "not_selected"
+                if ContentChannel.blog not in requested
+                else project.blog_status.value
+            ),
+            "short_video": (
+                "not_selected"
+                if ContentChannel.short_video not in requested
+                else project.video_status.value
+            ),
+            "quality": project.consistency_report.status.value,
+        }
+        st.json(readiness)
+
+        blog_review_ready = (
+            ContentChannel.blog not in requested
+            or project.blog_status.value == "draft_complete"
+        )
+        video_review_ready = (
+            ContentChannel.short_video not in requested
+            or project.video_status == VideoStatus.complete
+        )
+        has_reviewable_output = bool(
+            (ContentChannel.blog in requested and project.blog_output)
+            or (ContentChannel.short_video in requested and project.video_output)
+        )
+        quality_warning = project.consistency_report.status.value == "warning"
+
+        with st.form("content-review"):
+            review_note = st.text_area(
+                "검토 메모",
+                placeholder="승인 근거 또는 필요한 수정 사항을 기록하세요.",
+            )
+            acknowledge_warnings = st.checkbox(
+                "일관성 검사 경고를 검토하고 승인에 반영했습니다.",
+                disabled=not quality_warning,
+            )
+            approve, request_changes = st.columns(2)
+            approve_clicked = approve.form_submit_button(
+                "현재 결과 승인",
+                type="primary",
+                use_container_width=True,
+                disabled=(
+                    not has_reviewable_output
+                    or not blog_review_ready
+                    or not video_review_ready
+                    or (quality_warning and not acknowledge_warnings)
+                ),
+            )
+            changes_clicked = request_changes.form_submit_button(
+                "수정 요청",
+                use_container_width=True,
+                disabled=not has_reviewable_output,
+            )
+
+        if approve_clicked or changes_clicked:
+            decision = (
+                ReviewDecision.approve
+                if approve_clicked
+                else ReviewDecision.request_changes
+            )
+            try:
+                workflow().review_project(
+                    project.project_id,
+                    ContentReviewRequest(
+                        decision=decision,
+                        note=review_note,
+                        acknowledge_quality_warnings=acknowledge_warnings,
+                    ),
+                )
+            except Exception as exc:
+                st.error(f"검토 저장 실패: {exc}")
+            else:
+                st.success("검토 결정을 저장했습니다.")
+                st.rerun()
+
+        if project.review_record:
+            st.subheader("현재 검토 기록")
+            st.json(project.review_record.model_dump(mode="json"))
+        if (
+            current_approval
+            and ContentChannel.short_video in requested
+            and project.video_status == VideoStatus.complete
+        ):
+            st.info(
+                "영상은 승인된 로컬 결과입니다. 외부 영상 게시 기능은 아직 "
+                "연결하지 않았으며 자동 업로드도 비활성화되어 있습니다."
+            )

@@ -51,6 +51,31 @@ When both drafts exist, a deterministic consistency report compares used evidenc
 claim IDs and flags numbers that do not occur in any approved claim. This is a
 review aid, not a replacement for human fact checking.
 
+## Manual review and approval
+
+The Review & Approve screen summarizes selected channel readiness and the quality
+report. A reviewer can either approve the current outputs or request changes with a
+required note. Cross-channel quality warnings require an explicit acknowledgement
+before approval.
+
+An approval stores:
+
+- selected channels;
+- review time and optional note;
+- whether quality warnings were acknowledged; and
+- a SHA-256 digest of the approved EvidencePack, channel outputs, and consistency
+  report.
+
+Regenerating a selected channel invalidates the approval and retains the prior
+review record with an invalidation time and reason. Ghost synchronization recomputes
+the snapshot digest and refuses to proceed if the current output no longer matches
+the approval. This prevents an approval for one draft from being reused after the
+draft changes.
+
+Approval itself has no external side effect. An additional, explicit Ghost action
+is required, and it still creates or updates only a `draft`. Approved videos remain
+local; no external video publisher is connected in this stage.
+
 REST endpoints:
 
 ```text
@@ -59,6 +84,7 @@ POST /api/v1/content/projects/{project_id}/research
 POST /api/v1/content/projects/{project_id}/evidence/approve
 POST /api/v1/content/projects/{project_id}/fanout
 POST /api/v1/content/projects/{project_id}/video/refresh
+POST /api/v1/content/projects/{project_id}/review
 POST /api/v1/content/projects/{project_id}/blog
 POST /api/v1/content/projects/{project_id}/ghost-draft
 GET  /api/v1/content/projects

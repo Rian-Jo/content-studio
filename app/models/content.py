@@ -62,6 +62,11 @@ class ApprovalStatus(str, Enum):
     changes_requested = "changes_requested"
 
 
+class ReviewDecision(str, Enum):
+    approve = "approve"
+    request_changes = "request_changes"
+
+
 class BlogOutput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     slug: str = Field(min_length=1, max_length=191, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -133,6 +138,7 @@ class ContentFanoutRequest(BaseModel):
     video_options: VideoGenerationOptions = Field(
         default_factory=VideoGenerationOptions
     )
+    regenerate: bool = False
 
     @model_validator(mode="after")
     def reject_duplicate_channels(self) -> ContentFanoutRequest:
@@ -144,6 +150,32 @@ class ContentFanoutRequest(BaseModel):
         ):
             raise ValueError("video_options.voice_name is required for short video")
         return self
+
+
+class ContentReviewRequest(BaseModel):
+    decision: ReviewDecision
+    note: str | None = Field(default=None, max_length=2000)
+    acknowledge_quality_warnings: bool = False
+
+    @model_validator(mode="after")
+    def require_changes_note(self) -> ContentReviewRequest:
+        if (
+            self.decision == ReviewDecision.request_changes
+            and not (self.note or "").strip()
+        ):
+            raise ValueError("a review note is required when requesting changes")
+        return self
+
+
+class ReviewRecord(BaseModel):
+    status: ApprovalStatus
+    reviewed_at: datetime
+    note: str | None = Field(default=None, max_length=2000)
+    reviewed_channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    quality_warnings_acknowledged: bool = False
+    invalidated_at: datetime | None = None
+    invalidated_reason: str | None = Field(default=None, max_length=500)
 
 
 class GhostPublication(BaseModel):
@@ -176,6 +208,7 @@ class ContentProject(ContentProjectCreate):
     ghost_status: GhostStatus = GhostStatus.not_configured
     ghost_publication: GhostPublication | None = None
     approval_status: ApprovalStatus = ApprovalStatus.waiting_for_review
+    review_record: ReviewRecord | None = None
     last_error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
