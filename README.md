@@ -15,16 +15,20 @@ own output and status even when another channel has not started or has failed.
 ## Implemented in the current MVP
 
 - `ContentProject` and `BlogOutput` domain models
+- Verified collection of user-supplied public HTTP/HTTPS source URLs
+- `EvidencePack` records with claim-to-source links and a manual approval gate
 - Local SQLite project-state storage
-- An independent `BlogWorkflow` that does not require video generation
+- An independent `BlogWorkflow` that generates only from approved evidence and
+  does not require video generation
 - A server-side Ghost Admin API integration limited to creating or updating drafts
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
 
-The following roadmap items are **not implemented yet**: research and EvidencePack
-generation, source verification, blog/video fan-out, the MoneyPrinterTurbo video
-adapter, newsletter and social workflows, unified publishing approval, and
-post-publication analytics.
+Automatic source discovery and search-provider integrations are **not implemented**;
+the current research step verifies URLs supplied by the user. Other roadmap items
+not implemented yet are blog/video fan-out, the MoneyPrinterTurbo video adapter,
+newsletter and social workflows, unified publishing approval, and post-publication
+analytics.
 
 ## Run Content Studio locally
 
@@ -39,6 +43,20 @@ uv run streamlit run webui\ContentStudio.py
 Blog generation uses the LLM provider configured locally for MoneyPrinterTurbo.
 The local `config.toml`, generated content, SQLite state, logs, caches, and virtual
 environment are excluded from Git.
+
+The Content Studio flow is:
+
+```text
+Create project
+  -> submit public source URLs
+  -> verify sources and build claim-to-source links
+  -> review and approve the EvidencePack
+  -> generate the blog draft
+  -> optionally synchronize a Ghost draft
+```
+
+Private, loopback, link-local, and credential-bearing source URLs are rejected.
+Source text is treated as untrusted reference data, not as LLM instructions.
 
 ## Optional Ghost draft integration
 

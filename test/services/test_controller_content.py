@@ -10,9 +10,18 @@ from fastapi.testclient import TestClient
 from app import asgi
 from app.controllers.v1 import content as content_controller
 from app.models.content import ContentProjectCreate
-from app.services.content import BlogGenerator, ContentStore, ContentWorkflow
+from app.services.content import (
+    BlogGenerator,
+    ContentStore,
+    ContentWorkflow,
+    EvidenceBuilder,
+)
 
-from test.services.test_content_studio import sample_blog_payload
+from test.services.test_content_studio import (
+    FakeResearcher,
+    sample_blog_payload,
+    sample_evidence_payload,
+)
 
 
 class TestContentControllerHTTP(unittest.TestCase):
@@ -22,7 +31,15 @@ class TestContentControllerHTTP(unittest.TestCase):
         generator = BlogGenerator(
             responder=lambda _: json.dumps(sample_blog_payload())
         )
-        self.workflow = ContentWorkflow(store=store, blog_generator=generator)
+        evidence_builder = EvidenceBuilder(
+            responder=lambda _: json.dumps(sample_evidence_payload())
+        )
+        self.workflow = ContentWorkflow(
+            store=store,
+            blog_generator=generator,
+            researcher=FakeResearcher(),
+            evidence_builder=evidence_builder,
+        )
         self.original_workflow = content_controller._workflow
         content_controller._workflow = self.workflow
         self.client = TestClient(asgi.app)
@@ -45,11 +62,25 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         project_id = created.json()["data"]["project_id"]
 
+        blocked = self.client.post(f"/api/v1/content/projects/{project_id}/blog")
+        researched = self.client.post(
+            f"/api/v1/content/projects/{project_id}/research",
+            json={"sources": [{"url": "https://example.com/research"}]},
+        )
+        approved = self.client.post(
+            f"/api/v1/content/projects/{project_id}/evidence/approve",
+            json={"note": "Reviewed in the API test"},
+        )
         generated = self.client.post(
             f"/api/v1/content/projects/{project_id}/blog"
         )
         fetched = self.client.get(f"/api/v1/content/projects/{project_id}")
 
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(
+            researched.json()["data"]["evidence_status"], "ready_for_review"
+        )
+        self.assertEqual(approved.json()["data"]["evidence_status"], "approved")
         self.assertEqual(generated.status_code, 200)
         self.assertEqual(generated.json()["data"]["blog_status"], "draft_complete")
         self.assertEqual(fetched.json()["data"]["blog_output"]["slug"], "useful-guide")

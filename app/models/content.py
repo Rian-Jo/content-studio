@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from app.models.evidence import EvidencePack, EvidenceStatus
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -69,6 +71,8 @@ class ContentProjectCreate(BaseModel):
 
 class ContentProject(ContentProjectCreate):
     project_id: str = Field(default_factory=lambda: str(uuid4()))
+    evidence_pack: EvidencePack | None = None
+    evidence_status: EvidenceStatus = EvidenceStatus.not_started
     blog_output: BlogOutput | None = None
     blog_status: BlogStatus = BlogStatus.not_started
     ghost_status: GhostStatus = GhostStatus.not_configured
