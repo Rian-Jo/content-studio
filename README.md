@@ -28,6 +28,8 @@ own output and status even when another channel has not started or has failed.
 - A unified manual review record bound to the exact evidence/output snapshot with
   SHA-256, quality-warning acknowledgement, and change-request notes
 - Automatic approval invalidation when a reviewed output is regenerated or changes
+- Approval-bound local release plans with checksummed manifests and ZIP export
+  bundles for controlled handoff
 - A server-side Ghost Admin API integration limited to creating or updating drafts
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
@@ -64,6 +66,7 @@ Create project
   -> independently generate a blog draft and/or MPT short video
   -> review channel status and the consistency report
   -> approve the exact output snapshot or request changes
+  -> create a local release plan and checksummed ZIP handoff package
   -> optionally synchronize an approved blog to a Ghost draft
 ```
 
@@ -76,6 +79,13 @@ LLM, TTS, and material-provider APIs and may incur their normal costs.
 Approval does not publish content. It unlocks only explicitly supported downstream
 actions. At present, that means creating or updating a Ghost **draft**. Public Ghost
 publishing, scheduling, and external video publishing remain unavailable.
+
+An approved snapshot can also be exported locally under
+`storage/content/releases/`. The package contains a manifest, evidence and review
+records, selected channel output, and per-file SHA-256 digests. An optional
+`planned_for` value is handoff metadata only: Content Studio does not execute a
+scheduled publication. Rendered video files are not duplicated into the ZIP; the
+video plan records their filenames and makes that omission explicit.
 
 ## Optional Ghost draft integration
 

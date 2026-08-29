@@ -2,6 +2,7 @@
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -18,6 +19,7 @@ from app.models.content import (  # noqa: E402
     ContentChannel,
     ContentFanoutRequest,
     ContentProjectCreate,
+    ContentReleaseRequest,
     ContentReviewRequest,
     ReviewDecision,
     VideoGenerationOptions,
@@ -269,13 +271,14 @@ with left:
         st.caption("현재 결과 스냅샷을 승인한 후 Ghost 초안을 동기화할 수 있습니다.")
 
 with right:
-    evidence_tab, blog_tab, video_tab, quality_tab, review_tab = st.tabs(
+    evidence_tab, blog_tab, video_tab, quality_tab, review_tab, release_tab = st.tabs(
         [
             "Research & Evidence",
             "블로그 미리보기",
             "영상",
             "일관성 검사",
             "Review & Approve",
+            "Release Plan & Export",
         ]
     )
     with evidence_tab:
@@ -460,3 +463,82 @@ with right:
                 "영상은 승인된 로컬 결과입니다. 외부 영상 게시 기능은 아직 "
                 "연결하지 않았으며 자동 업로드도 비활성화되어 있습니다."
             )
+
+    with release_tab:
+        st.subheader("배포 준비 및 로컬 내보내기")
+        st.caption(
+            "승인된 결과를 매니페스트와 ZIP으로 고정합니다. 이 작업은 Ghost 공개 "
+            "발행, 예약 실행 또는 외부 영상 업로드를 호출하지 않습니다."
+        )
+        approved_channels = (
+            [channel.value for channel in project.review_record.reviewed_channels]
+            if current_approval and project.review_record
+            else []
+        )
+        with st.form("content-release-plan"):
+            release_channels = st.multiselect(
+                "내보낼 승인 채널",
+                options=approved_channels,
+                default=approved_channels,
+                disabled=not current_approval,
+            )
+            planned_for_text = st.text_input(
+                "계획 시각 (선택, ISO 8601 시간대 포함)",
+                placeholder="2026-09-01T09:00:00+09:00",
+                disabled=not current_approval,
+            )
+            release_note = st.text_area(
+                "릴리스 메모",
+                placeholder="배포 담당자에게 전달할 확인 사항을 기록하세요.",
+                disabled=not current_approval,
+            )
+            create_release = st.form_submit_button(
+                "로컬 릴리스 패키지 만들기",
+                type="primary",
+                use_container_width=True,
+                disabled=not current_approval or not release_channels,
+            )
+
+        if create_release:
+            try:
+                planned_for = (
+                    datetime.fromisoformat(planned_for_text.replace("Z", "+00:00"))
+                    if planned_for_text.strip()
+                    else None
+                )
+                workflow().create_release_plan(
+                    project.project_id,
+                    ContentReleaseRequest(
+                        channels=release_channels,
+                        planned_for=planned_for,
+                        note=release_note,
+                    ),
+                )
+            except Exception as exc:
+                st.error(f"릴리스 패키지 생성 실패: {exc}")
+            else:
+                st.success("승인 스냅샷 기반 로컬 릴리스 패키지를 만들었습니다.")
+                st.rerun()
+
+        if not current_approval:
+            st.info("현재 결과 스냅샷을 승인해야 릴리스 패키지를 만들 수 있습니다.")
+        if project.release_plans:
+            st.subheader("릴리스 계획 기록")
+            for plan in reversed(project.release_plans):
+                with st.expander(
+                    f"{plan.release_id} · {plan.status.value}",
+                    expanded=plan == project.release_plans[-1],
+                ):
+                    st.json(plan.model_dump(mode="json"))
+                    archive_path = (
+                        workflow().release_service.storage_root / plan.archive_path
+                    )
+                    if archive_path.is_file():
+                        st.download_button(
+                            "ZIP 패키지 다운로드",
+                            data=archive_path.read_bytes(),
+                            file_name=archive_path.name,
+                            mime="application/zip",
+                            key=f"download-release-{plan.release_id}",
+                            use_container_width=True,
+                        )

@@ -12,6 +12,7 @@ from app.controllers.v1 import content as content_controller
 from app.models.content import ContentProjectCreate
 from app.services.content import (
     BlogGenerator,
+    ContentReleaseService,
     ContentStore,
     ContentWorkflow,
 )
@@ -31,12 +32,16 @@ class TestContentControllerHTTP(unittest.TestCase):
         generator = BlogGenerator(
             responder=lambda _: json.dumps(sample_blog_payload())
         )
+        self.release_service = ContentReleaseService(
+            Path(self.temp_dir.name) / "releases"
+        )
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
             researcher=FakeResearcher(),
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),
+            release_service=self.release_service,
         )
         self.original_workflow = content_controller._workflow
         content_controller._workflow = self.workflow
@@ -112,6 +117,10 @@ class TestContentControllerHTTP(unittest.TestCase):
             f"/api/v1/content/projects/{project_id}/review",
             json={"decision": "approve"},
         )
+        release = self.client.post(
+            f"/api/v1/content/projects/{project_id}/release-plans",
+            json={"channels": ["blog", "short_video"]},
+        )
 
         self.assertEqual(fanout.status_code, 200)
         self.assertEqual(fanout.json()["data"]["video_status"], "queued")
@@ -122,6 +131,12 @@ class TestContentControllerHTTP(unittest.TestCase):
         )
         self.assertEqual(reviewed.status_code, 200)
         self.assertEqual(reviewed.json()["data"]["approval_status"], "approved")
+        self.assertEqual(release.status_code, 200)
+        release_plan = release.json()["data"]["release_plans"][-1]
+        self.assertFalse(release_plan["external_actions_performed"])
+        self.assertTrue(
+            (self.release_service.storage_root / release_plan["archive_path"]).is_file()
+        )
 
     def test_request_changes_requires_note(self):
         project = self.workflow.create_project(

@@ -76,6 +76,26 @@ Approval itself has no external side effect. An additional, explicit Ghost actio
 is required, and it still creates or updates only a `draft`. Approved videos remain
 local; no external video publisher is connected in this stage.
 
+## Release planning and local export
+
+After approval, a reviewer can create a release plan for any channel included in
+the current approval. Content Studio rechecks the approval digest before writing a
+package under `storage/content/releases/<project-id>/<release-id>/` and a matching
+ZIP archive. The bundle contains:
+
+- the approved EvidencePack, review record, and consistency report;
+- Markdown, HTML, and metadata for a selected blog output;
+- the selected short-video plan, with rendered-file paths reduced to filenames;
+- a release handoff record; and
+- a manifest containing byte sizes and SHA-256 digests for every payload file.
+
+The package deliberately does not copy rendered video media and does not call
+Ghost or any video publisher. `planned_for` is time-zone-aware coordination
+metadata, not an executable schedule. Every release record states
+`external_actions_performed: false`. Regeneration, output changes, or a reviewer
+requesting changes marks existing ready plans as `stale` while preserving their
+immutable local artifacts for audit and comparison.
+
 REST endpoints:
 
 ```text
@@ -85,6 +105,7 @@ POST /api/v1/content/projects/{project_id}/evidence/approve
 POST /api/v1/content/projects/{project_id}/fanout
 POST /api/v1/content/projects/{project_id}/video/refresh
 POST /api/v1/content/projects/{project_id}/review
+POST /api/v1/content/projects/{project_id}/release-plans
 POST /api/v1/content/projects/{project_id}/blog
 POST /api/v1/content/projects/{project_id}/ghost-draft
 GET  /api/v1/content/projects
@@ -118,4 +139,5 @@ not expose a public-publish operation.
 
 Content state is stored in `storage/content/content.db`. Generated Markdown and HTML
 and the EvidencePack remain in the local project snapshot even after a Ghost draft
-is synchronized.
+is synchronized. Local release directories and ZIP archives are stored below
+`storage/content/releases/`; this ignored runtime directory is not committed.

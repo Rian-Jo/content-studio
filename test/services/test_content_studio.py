@@ -2,6 +2,7 @@ import base64
 import json
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from app.models.content import (
     ContentFanoutRequest,
     ContentProject,
     ContentProjectCreate,
+    ContentReleaseRequest,
     ContentReviewRequest,
     GhostPublication,
     GhostStatus,
@@ -37,6 +39,7 @@ from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher, ensure_public_http_url
+from app.services.content.release import ContentReleaseService
 from app.services.content.store import ContentProjectNotFoundError, ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter
 from app.services.content.video_generator import VideoPlanGenerator
@@ -479,12 +482,16 @@ class TestContentWorkflow(unittest.TestCase):
         generator = BlogGenerator(
             responder=lambda _: json.dumps(sample_blog_payload())
         )
+        self.release_service = ContentReleaseService(
+            Path(self.temp_dir.name) / "releases"
+        )
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
             researcher=FakeResearcher(),
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),
+            release_service=self.release_service,
         )
 
     def tearDown(self):
@@ -694,6 +701,117 @@ class TestContentWorkflow(unittest.TestCase):
 
         self.assertEqual(regenerated.approval_status, "waiting_for_review")
         self.assertIsNotNone(regenerated.review_record.invalidated_at)
+
+    def test_release_export_is_bound_to_approval_without_external_action(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        reviewed = self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=[ContentChannel.blog]),
+        )
+
+        plan = released.release_plans[-1]
+        archive_path = self.release_service.storage_root / plan.archive_path
+        manifest_path = (
+            self.release_service.storage_root / plan.bundle_path / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        with zipfile.ZipFile(archive_path) as archive:
+            archived_names = set(archive.namelist())
+
+        self.assertEqual(
+            plan.approval_snapshot_sha256,
+            reviewed.review_record.snapshot_sha256,
+        )
+        self.assertFalse(plan.external_actions_performed)
+        self.assertFalse(manifest["external_actions_performed"])
+        self.assertIn("blog/article.md", archived_names)
+        self.assertIn("evidence.json", archived_names)
+        self.assertIn("review.json", archived_names)
+        self.assertIn("manifest.json", archived_names)
+        self.assertTrue(archive_path.is_file())
+
+    def test_release_export_requires_current_channel_approval(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+
+        with self.assertRaisesRegex(ValueError, "approve the current output"):
+            self.workflow.create_release_plan(
+                project.project_id,
+                ContentReleaseRequest(channels=[ContentChannel.blog]),
+            )
+
+    def test_video_release_exports_plan_without_copying_rendered_media(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["blog", "short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+        self.workflow.refresh_video(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=[ContentChannel.short_video]),
+        )
+
+        plan = released.release_plans[-1]
+        archive_path = self.release_service.storage_root / plan.archive_path
+        video_plan_path = (
+            self.release_service.storage_root
+            / plan.bundle_path
+            / "short-video"
+            / "plan.json"
+        )
+        video_plan = json.loads(video_plan_path.read_text(encoding="utf-8"))
+        with zipfile.ZipFile(archive_path) as archive:
+            archived_names = set(archive.namelist())
+
+        self.assertEqual(video_plan["rendered_files"], ["final.mp4"])
+        self.assertFalse(video_plan["media_files_copied"])
+        self.assertIn("short-video/plan.json", archived_names)
+        self.assertNotIn("final.mp4", archived_names)
+
+    def test_regeneration_marks_existing_release_plan_stale(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=[ContentChannel.blog]),
+        )
+
+        regenerated = self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(channels=["blog"], regenerate=True),
+        )
+
+        self.assertEqual(regenerated.release_plans[-1].status, "stale")
+        self.assertIsNotNone(regenerated.release_plans[-1].stale_at)
+
+    def test_release_request_requires_timezone_for_planned_time(self):
+        with self.assertRaisesRegex(ValueError, "timezone offset"):
+            ContentReleaseRequest(
+                channels=[ContentChannel.blog],
+                planned_for=datetime(2026, 9, 1, 9, 0),
+            )
 
     def test_ghost_sync_rejects_changed_snapshot(self):
         project = approved_project()

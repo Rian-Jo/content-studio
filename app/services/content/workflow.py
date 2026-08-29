@@ -9,6 +9,7 @@ from app.models.content import (
     ContentFanoutRequest,
     ContentProject,
     ContentProjectCreate,
+    ContentReleaseRequest,
     ContentReviewRequest,
     GhostStatus,
     LLMUsageRecord,
@@ -20,6 +21,7 @@ from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher
+from app.services.content.release import ContentReleaseService
 from app.services.content.review import ContentReviewService
 from app.services.content.store import ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter, VideoGenerator
@@ -36,6 +38,7 @@ class ContentWorkflow:
         video_generator: VideoGenerator | None = None,
         consistency_checker: ContentConsistencyChecker | None = None,
         review_service: ContentReviewService | None = None,
+        release_service: ContentReleaseService | None = None,
     ):
         self.store = store or ContentStore()
         self.blog_generator = blog_generator or BlogGenerator()
@@ -44,6 +47,9 @@ class ContentWorkflow:
         self.video_generator = video_generator or MoneyPrinterVideoAdapter()
         self.consistency_checker = consistency_checker or ContentConsistencyChecker()
         self.review_service = review_service or ContentReviewService()
+        self.release_service = release_service or ContentReleaseService(
+            review_service=self.review_service
+        )
 
     def create_project(self, request: ContentProjectCreate) -> ContentProject:
         return self.store.save(ContentProject(**request.model_dump()))
@@ -93,7 +99,7 @@ class ContentWorkflow:
             or project.evidence_pack is None
         ):
             raise ValueError("approve an EvidencePack before generating a blog draft")
-        self.review_service.invalidate(project, "blog output generation started")
+        self._invalidate_downstream(project, "blog output generation started")
         project.blog_status = BlogStatus.generating
         project.last_error = None
         project.channel_runs[ContentChannel.blog.value] = ChannelRunRecord(
@@ -197,7 +203,7 @@ class ContentWorkflow:
             )
 
         if operations or previous_channels != request.channels:
-            self.review_service.invalidate(
+            self._invalidate_downstream(
                 project, "channel selection or output generation changed"
             )
         self.store.save(project)
@@ -266,7 +272,7 @@ class ContentWorkflow:
             project.last_error = f"short_video: {error}"
         output_changed = output.model_dump(mode="json") != previous_output
         if output_changed:
-            self.review_service.invalidate(project, "video output changed")
+            self._invalidate_downstream(project, "video output changed")
         if output_changed or status != previous_status:
             project.consistency_report = self.consistency_checker.check(project)
         return self.store.save(project)
@@ -276,6 +282,16 @@ class ContentWorkflow:
     ) -> ContentProject:
         project = self.store.get(project_id)
         project = self.review_service.review(project, request)
+        if project.approval_status.value == "changes_requested":
+            self.release_service.invalidate(project, "reviewer requested changes")
+        project.last_error = None
+        return self.store.save(project)
+
+    def create_release_plan(
+        self, project_id: str, request: ContentReleaseRequest
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.release_service.create(project, request)
         project.last_error = None
         return self.store.save(project)
 
@@ -302,3 +318,7 @@ class ContentWorkflow:
             self.store.save(project)
             raise
         return self.store.save(project)
+
+    def _invalidate_downstream(self, project: ContentProject, reason: str) -> None:
+        self.review_service.invalidate(project, reason)
+        self.release_service.invalidate(project, reason)

@@ -67,6 +67,11 @@ class ReviewDecision(str, Enum):
     request_changes = "request_changes"
 
 
+class ReleasePlanStatus(str, Enum):
+    ready = "ready"
+    stale = "stale"
+
+
 class BlogOutput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     slug: str = Field(min_length=1, max_length=191, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -178,6 +183,44 @@ class ReviewRecord(BaseModel):
     invalidated_reason: str | None = Field(default=None, max_length=500)
 
 
+class ContentReleaseRequest(BaseModel):
+    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    planned_for: datetime | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_release_request(self) -> ContentReleaseRequest:
+        if len(self.channels) != len(set(self.channels)):
+            raise ValueError("release channels must be unique")
+        if self.planned_for is not None and self.planned_for.tzinfo is None:
+            raise ValueError("planned_for must include a timezone offset")
+        return self
+
+
+class ReleaseArtifact(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=500)
+    media_type: str = Field(min_length=1, max_length=100)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ReleasePlan(BaseModel):
+    release_id: str
+    status: ReleasePlanStatus = ReleasePlanStatus.ready
+    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    created_at: datetime
+    planned_for: datetime | None = None
+    note: str | None = Field(default=None, max_length=2000)
+    approval_snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bundle_path: str = Field(min_length=1, max_length=500)
+    archive_path: str = Field(min_length=1, max_length=500)
+    artifacts: list[ReleaseArtifact] = Field(min_length=1, max_length=20)
+    external_actions_performed: bool = False
+    stale_at: datetime | None = None
+    stale_reason: str | None = Field(default=None, max_length=500)
+
+
 class GhostPublication(BaseModel):
     post_id: str
     updated_at: str
@@ -209,6 +252,7 @@ class ContentProject(ContentProjectCreate):
     ghost_publication: GhostPublication | None = None
     approval_status: ApprovalStatus = ApprovalStatus.waiting_for_review
     review_record: ReviewRecord | None = None
+    release_plans: list[ReleasePlan] = Field(default_factory=list, max_length=50)
     last_error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
