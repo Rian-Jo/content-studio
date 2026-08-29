@@ -21,6 +21,8 @@ from app.models.content import (  # noqa: E402
     ContentProjectCreate,
     ContentReleaseRequest,
     ContentReviewRequest,
+    PublicationObservationRequest,
+    PublicationReceiptRequest,
     ReviewDecision,
     VideoGenerationOptions,
     VideoStatus,
@@ -271,7 +273,15 @@ with left:
         st.caption("현재 결과 스냅샷을 승인한 후 Ghost 초안을 동기화할 수 있습니다.")
 
 with right:
-    evidence_tab, blog_tab, video_tab, quality_tab, review_tab, release_tab = st.tabs(
+    (
+        evidence_tab,
+        blog_tab,
+        video_tab,
+        quality_tab,
+        review_tab,
+        release_tab,
+        publication_tab,
+    ) = st.tabs(
         [
             "Research & Evidence",
             "블로그 미리보기",
@@ -279,6 +289,7 @@ with right:
             "일관성 검사",
             "Review & Approve",
             "Release Plan & Export",
+            "Publication Tracking",
         ]
     )
     with evidence_tab:
@@ -542,3 +553,136 @@ with right:
                             key=f"download-release-{plan.release_id}",
                             use_container_width=True,
                         )
+
+    with publication_tab:
+        st.subheader("수동 게시 결과 및 성과 추적")
+        st.caption(
+            "Content Studio가 게시하는 화면이 아닙니다. 다른 도구에서 이미 게시한 "
+            "공개 URL을 릴리스와 연결하고 읽기 전용 상태 확인과 수동 지표를 기록합니다."
+        )
+        ready_plans = [
+            plan for plan in project.release_plans if plan.status.value == "ready"
+        ]
+        if ready_plans:
+            ready_plan_map = {plan.release_id: plan for plan in ready_plans}
+            with st.form("record-publication"):
+                publication_release_id = st.selectbox(
+                    "게시된 릴리스",
+                    options=list(ready_plan_map),
+                    format_func=lambda value: (
+                        f"{value} · "
+                        f"{', '.join(channel.value for channel in ready_plan_map[value].channels)}"
+                    ),
+                )
+                selected_release = ready_plan_map[publication_release_id]
+                publication_channel = st.selectbox(
+                    "게시 채널",
+                    options=[channel.value for channel in selected_release.channels],
+                )
+                publication_platform = st.selectbox(
+                    "플랫폼",
+                    options=["ghost", "youtube", "tiktok", "instagram", "other"],
+                )
+                publication_url = st.text_input(
+                    "공개 URL", placeholder="https://example.com/published-content"
+                )
+                published_at_text = st.text_input(
+                    "실제 게시 시각 (ISO 8601 시간대 포함)",
+                    placeholder="2026-09-01T09:00:00+09:00",
+                )
+                publication_note = st.text_area("게시 기록 메모")
+                confirm_manual_publication = st.checkbox(
+                    "이 콘텐츠는 Content Studio 밖에서 이미 수동 게시되었으며, "
+                    "공개 URL의 읽기 전용 확인에 동의합니다."
+                )
+                record_publication = st.form_submit_button(
+                    "게시 영수증 기록",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not confirm_manual_publication,
+                )
+
+            if record_publication:
+                try:
+                    published_at = datetime.fromisoformat(
+                        published_at_text.replace("Z", "+00:00")
+                    )
+                    workflow().record_publication(
+                        project.project_id,
+                        PublicationReceiptRequest(
+                            release_id=publication_release_id,
+                            channel=publication_channel,
+                            platform=publication_platform,
+                            public_url=publication_url,
+                            published_at=published_at,
+                            note=publication_note,
+                        ),
+                    )
+                except Exception as exc:
+                    st.error(f"게시 영수증 기록 실패: {exc}")
+                else:
+                    st.success("게시 URL과 최초 도달 상태를 기록했습니다.")
+                    st.rerun()
+        else:
+            st.info("현재 승인과 일치하는 ready 릴리스 패키지가 필요합니다.")
+
+        if project.publication_receipts:
+            receipt_map = {
+                receipt.receipt_id: receipt for receipt in project.publication_receipts
+            }
+            with st.form("observe-publication"):
+                observation_receipt_id = st.selectbox(
+                    "관측할 게시물",
+                    options=list(receipt_map),
+                    format_func=lambda value: (
+                        f"{receipt_map[value].platform.value} · "
+                        f"{receipt_map[value].public_url}"
+                    ),
+                )
+                metric_columns = st.columns(5)
+                views_text = metric_columns[0].text_input("조회", key="metric-views")
+                likes_text = metric_columns[1].text_input("좋아요", key="metric-likes")
+                comments_text = metric_columns[2].text_input(
+                    "댓글", key="metric-comments"
+                )
+                shares_text = metric_columns[3].text_input("공유", key="metric-shares")
+                clicks_text = metric_columns[4].text_input("클릭", key="metric-clicks")
+                observation_note = st.text_area("관측 메모")
+                observe_publication = st.form_submit_button(
+                    "URL 재확인 및 관측 기록",
+                    use_container_width=True,
+                )
+
+            if observe_publication:
+                def optional_count(value: str) -> int | None:
+                    return int(value) if value.strip() else None
+
+                try:
+                    workflow().observe_publication(
+                        project.project_id,
+                        observation_receipt_id,
+                        PublicationObservationRequest(
+                            views=optional_count(views_text),
+                            likes=optional_count(likes_text),
+                            comments=optional_count(comments_text),
+                            shares=optional_count(shares_text),
+                            clicks=optional_count(clicks_text),
+                            note=observation_note,
+                        ),
+                    )
+                except Exception as exc:
+                    st.error(f"게시 관측 기록 실패: {exc}")
+                else:
+                    st.success("공개 URL 상태와 수동 성과 지표를 기록했습니다.")
+                    st.rerun()
+
+            st.subheader("게시 영수증 기록")
+            for receipt in reversed(project.publication_receipts):
+                latest = receipt.observations[-1]
+                with st.expander(
+                    f"{receipt.platform.value} · {receipt.channel.value} · "
+                    f"{latest.reachability.value}",
+                    expanded=receipt == project.publication_receipts[-1],
+                ):
+                    st.caption(receipt.public_url)
+                    st.json(receipt.model_dump(mode="json"))

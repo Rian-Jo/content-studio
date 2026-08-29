@@ -12,6 +12,7 @@ from app.controllers.v1 import content as content_controller
 from app.models.content import ContentProjectCreate
 from app.services.content import (
     BlogGenerator,
+    ContentPublicationService,
     ContentReleaseService,
     ContentStore,
     ContentWorkflow,
@@ -20,6 +21,7 @@ from app.services.content import (
 from test.services.test_content_studio import (
     FakeEvidenceBuilder,
     FakeResearcher,
+    FakePublicationVerifier,
     FakeVideoGenerator,
     sample_blog_payload,
 )
@@ -35,6 +37,7 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.release_service = ContentReleaseService(
             Path(self.temp_dir.name) / "releases"
         )
+        self.publication_verifier = FakePublicationVerifier()
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
@@ -42,6 +45,9 @@ class TestContentControllerHTTP(unittest.TestCase):
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),
             release_service=self.release_service,
+            publication_service=ContentPublicationService(
+                verifier=self.publication_verifier
+            ),
         )
         self.original_workflow = content_controller._workflow
         content_controller._workflow = self.workflow
@@ -121,6 +127,25 @@ class TestContentControllerHTTP(unittest.TestCase):
             f"/api/v1/content/projects/{project_id}/release-plans",
             json={"channels": ["blog", "short_video"]},
         )
+        release_id = release.json()["data"]["release_plans"][-1]["release_id"]
+        publication = self.client.post(
+            f"/api/v1/content/projects/{project_id}/publications",
+            json={
+                "release_id": release_id,
+                "channel": "blog",
+                "platform": "ghost",
+                "public_url": "https://example.com/published",
+                "published_at": "2026-08-30T09:00:00+09:00",
+            },
+        )
+        receipt_id = publication.json()["data"]["publication_receipts"][-1][
+            "receipt_id"
+        ]
+        observation = self.client.post(
+            f"/api/v1/content/projects/{project_id}/publications/"
+            f"{receipt_id}/observations",
+            json={"views": 100, "likes": 8, "clicks": 14},
+        )
 
         self.assertEqual(fanout.status_code, 200)
         self.assertEqual(fanout.json()["data"]["video_status"], "queued")
@@ -137,6 +162,13 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.assertTrue(
             (self.release_service.storage_root / release_plan["archive_path"]).is_file()
         )
+        self.assertEqual(publication.status_code, 200)
+        self.assertEqual(observation.status_code, 200)
+        latest_observation = observation.json()["data"]["publication_receipts"][-1][
+            "observations"
+        ][-1]
+        self.assertEqual(latest_observation["views"], 100)
+        self.assertEqual(latest_observation["metrics_source"], "manual")
 
     def test_request_changes_requires_note(self):
         project = self.workflow.create_project(

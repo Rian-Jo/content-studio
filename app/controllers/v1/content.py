@@ -11,6 +11,8 @@ from app.models.content import (
     ContentProjectResponse,
     ContentReleaseRequest,
     ContentReviewRequest,
+    PublicationObservationRequest,
+    PublicationReceiptRequest,
 )
 from app.models.evidence import EvidenceApprovalRequest, ResearchRequest
 from app.models.exception import HttpException
@@ -180,6 +182,47 @@ def create_content_release_plan(
 ):
     try:
         project = get_workflow().create_release_plan(project_id, body)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/publications",
+    response_model=ContentProjectResponse,
+    summary="Record and verify a manually published URL",
+)
+def record_content_publication(
+    request: Request, project_id: str, body: PublicationReceiptRequest
+):
+    try:
+        project = get_workflow().record_publication(project_id, body)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/publications/{receipt_id}/observations",
+    response_model=ContentProjectResponse,
+    summary="Verify a publication URL and append manual performance metrics",
+)
+def observe_content_publication(
+    request: Request,
+    project_id: str,
+    receipt_id: str,
+    body: PublicationObservationRequest,
+):
+    try:
+        project = get_workflow().observe_publication(project_id, receipt_id, body)
     except ContentProjectNotFoundError as exc:
         raise _not_found(request, project_id) from exc
     except ValueError as exc:

@@ -96,6 +96,26 @@ metadata, not an executable schedule. Every release record states
 requesting changes marks existing ready plans as `stale` while preserving their
 immutable local artifacts for audit and comparison.
 
+## Publication receipts and observations
+
+A `ready` release can be linked to a URL only after the user confirms that the
+content was already published outside Content Studio. The publication receipt
+stores the release and approval digests, channel, platform label, public URL,
+actual publication time, and an explicit
+`external_action_performed_by_studio: false` marker.
+
+The server performs a read-only URL check when a receipt or new observation is
+recorded. It validates the initial URL and every redirect before making the next
+request, rejecting credentials, localhost, private, link-local, and other
+non-public destinations. Reachability, final URL, HTTP status, content type, and
+response time are stored without downloading the response body.
+
+Optional views, likes, comments, shares, and clicks are stored as `manual`
+measurements in an append-only observation history. No provider account, private
+analytics page, or publishing API is accessed. A stale release cannot receive a
+new publication receipt, while existing receipts remain as historical evidence if
+their source release later becomes stale.
+
 REST endpoints:
 
 ```text
@@ -106,6 +126,8 @@ POST /api/v1/content/projects/{project_id}/fanout
 POST /api/v1/content/projects/{project_id}/video/refresh
 POST /api/v1/content/projects/{project_id}/review
 POST /api/v1/content/projects/{project_id}/release-plans
+POST /api/v1/content/projects/{project_id}/publications
+POST /api/v1/content/projects/{project_id}/publications/{receipt_id}/observations
 POST /api/v1/content/projects/{project_id}/blog
 POST /api/v1/content/projects/{project_id}/ghost-draft
 GET  /api/v1/content/projects

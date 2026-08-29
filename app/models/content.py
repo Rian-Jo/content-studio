@@ -72,6 +72,19 @@ class ReleasePlanStatus(str, Enum):
     stale = "stale"
 
 
+class PublicationPlatform(str, Enum):
+    ghost = "ghost"
+    youtube = "youtube"
+    tiktok = "tiktok"
+    instagram = "instagram"
+    other = "other"
+
+
+class PublicationReachability(str, Enum):
+    reachable = "reachable"
+    unreachable = "unreachable"
+
+
 class BlogOutput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     slug: str = Field(min_length=1, max_length=191, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -221,6 +234,63 @@ class ReleasePlan(BaseModel):
     stale_reason: str | None = Field(default=None, max_length=500)
 
 
+class PublicationReceiptRequest(BaseModel):
+    release_id: str = Field(min_length=1, max_length=100)
+    channel: ContentChannel
+    platform: PublicationPlatform
+    public_url: str = Field(min_length=1, max_length=2000)
+    published_at: datetime
+    note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_publication_timezone(self) -> PublicationReceiptRequest:
+        if self.published_at.tzinfo is None:
+            raise ValueError("published_at must include a timezone offset")
+        return self
+
+
+class PublicationObservationRequest(BaseModel):
+    views: int | None = Field(default=None, ge=0)
+    likes: int | None = Field(default=None, ge=0)
+    comments: int | None = Field(default=None, ge=0)
+    shares: int | None = Field(default=None, ge=0)
+    clicks: int | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class PublicationObservation(BaseModel):
+    observed_at: datetime
+    reachability: PublicationReachability
+    final_url: str | None = Field(default=None, max_length=2000)
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    content_type: str | None = Field(default=None, max_length=255)
+    response_time_ms: int | None = Field(default=None, ge=0)
+    error: str | None = Field(default=None, max_length=500)
+    views: int | None = Field(default=None, ge=0)
+    likes: int | None = Field(default=None, ge=0)
+    comments: int | None = Field(default=None, ge=0)
+    shares: int | None = Field(default=None, ge=0)
+    clicks: int | None = Field(default=None, ge=0)
+    metrics_source: Literal["manual"] = "manual"
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class PublicationReceipt(BaseModel):
+    receipt_id: str
+    release_id: str
+    channel: ContentChannel
+    platform: PublicationPlatform
+    public_url: str = Field(min_length=1, max_length=2000)
+    published_at: datetime
+    recorded_at: datetime
+    approval_snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    note: str | None = Field(default=None, max_length=2000)
+    external_action_performed_by_studio: bool = False
+    observations: list[PublicationObservation] = Field(
+        default_factory=list, max_length=100
+    )
+
+
 class GhostPublication(BaseModel):
     post_id: str
     updated_at: str
@@ -253,6 +323,9 @@ class ContentProject(ContentProjectCreate):
     approval_status: ApprovalStatus = ApprovalStatus.waiting_for_review
     review_record: ReviewRecord | None = None
     release_plans: list[ReleasePlan] = Field(default_factory=list, max_length=50)
+    publication_receipts: list[PublicationReceipt] = Field(
+        default_factory=list, max_length=100
+    )
     last_error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

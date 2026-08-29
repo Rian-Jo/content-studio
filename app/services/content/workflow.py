@@ -13,6 +13,8 @@ from app.models.content import (
     ContentReviewRequest,
     GhostStatus,
     LLMUsageRecord,
+    PublicationObservationRequest,
+    PublicationReceiptRequest,
     VideoStatus,
     utc_now,
 )
@@ -21,6 +23,7 @@ from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher
+from app.services.content.publication import ContentPublicationService
 from app.services.content.release import ContentReleaseService
 from app.services.content.review import ContentReviewService
 from app.services.content.store import ContentStore
@@ -39,6 +42,7 @@ class ContentWorkflow:
         consistency_checker: ContentConsistencyChecker | None = None,
         review_service: ContentReviewService | None = None,
         release_service: ContentReleaseService | None = None,
+        publication_service: ContentPublicationService | None = None,
     ):
         self.store = store or ContentStore()
         self.blog_generator = blog_generator or BlogGenerator()
@@ -48,6 +52,9 @@ class ContentWorkflow:
         self.consistency_checker = consistency_checker or ContentConsistencyChecker()
         self.review_service = review_service or ContentReviewService()
         self.release_service = release_service or ContentReleaseService(
+            review_service=self.review_service
+        )
+        self.publication_service = publication_service or ContentPublicationService(
             review_service=self.review_service
         )
 
@@ -292,6 +299,25 @@ class ContentWorkflow:
     ) -> ContentProject:
         project = self.store.get(project_id)
         project = self.release_service.create(project, request)
+        project.last_error = None
+        return self.store.save(project)
+
+    def record_publication(
+        self, project_id: str, request: PublicationReceiptRequest
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.publication_service.record(project, request)
+        project.last_error = None
+        return self.store.save(project)
+
+    def observe_publication(
+        self,
+        project_id: str,
+        receipt_id: str,
+        request: PublicationObservationRequest,
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.publication_service.observe(project, receipt_id, request)
         project.last_error = None
         return self.store.save(project)
 

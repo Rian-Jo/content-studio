@@ -21,6 +21,10 @@ from app.models.content import (
     ContentReviewRequest,
     GhostPublication,
     GhostStatus,
+    PublicationObservation,
+    PublicationObservationRequest,
+    PublicationReachability,
+    PublicationReceiptRequest,
     ReviewDecision,
     VideoGenerationOptions,
     VideoOutput,
@@ -38,6 +42,10 @@ from app.models.evidence import (
 from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
+from app.services.content.publication import (
+    ContentPublicationService,
+    PublicationUrlVerifier,
+)
 from app.services.content.research import SourceResearcher, ensure_public_http_url
 from app.services.content.release import ContentReleaseService
 from app.services.content.store import ContentProjectNotFoundError, ContentStore
@@ -339,6 +347,26 @@ class ResearchSession:
         return ResearchResponse()
 
 
+class PublicationResponse:
+    def __init__(self, status_code=200, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "text/html; charset=utf-8"}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class PublicationSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
 class TestSourceResearcher(unittest.TestCase):
     def test_verifies_and_extracts_public_source(self):
         session = ResearchSession()
@@ -358,6 +386,50 @@ class TestSourceResearcher(unittest.TestCase):
     def test_source_input_rejects_query_credentials(self):
         with self.assertRaisesRegex(ValueError, "credentials"):
             SourceInput(url="https://example.com/page?token=secret")
+
+
+class TestPublicationUrlVerifier(unittest.TestCase):
+    def test_verifies_each_redirect_and_records_final_status(self):
+        session = PublicationSession(
+            [
+                PublicationResponse(302, {"location": "/published"}),
+                PublicationResponse(200, {"content-type": "text/html"}),
+            ]
+        )
+        guarded = []
+        verifier = PublicationUrlVerifier(
+            session=session, url_guard=lambda url: guarded.append(url)
+        )
+
+        observation = verifier.verify(
+            "https://example.com/start", PublicationObservationRequest(views=10)
+        )
+
+        self.assertEqual(
+            guarded,
+            ["https://example.com/start", "https://example.com/published"],
+        )
+        self.assertEqual(observation.reachability, "reachable")
+        self.assertEqual(observation.final_url, "https://example.com/published")
+        self.assertEqual(observation.views, 10)
+
+    def test_blocks_redirect_to_non_public_address_before_request(self):
+        session = PublicationSession(
+            [PublicationResponse(302, {"location": "http://127.0.0.1/private"})]
+        )
+
+        def guard(url):
+            if "127.0.0.1" in url:
+                raise ValueError("private or non-public source URLs are not allowed")
+
+        verifier = PublicationUrlVerifier(session=session, url_guard=guard)
+
+        with self.assertRaisesRegex(ValueError, "publication URLs"):
+            verifier.verify(
+                "https://example.com/start", PublicationObservationRequest()
+            )
+
+        self.assertEqual(len(session.calls), 1)
 
 
 class FakeResponse:
@@ -470,6 +542,23 @@ class FakeVideoGenerator:
         )
 
 
+class FakePublicationVerifier:
+    def __init__(self):
+        self.calls = []
+
+    def verify(self, url, metrics):
+        self.calls.append((url, metrics))
+        return PublicationObservation(
+            observed_at=datetime.now(timezone.utc),
+            reachability=PublicationReachability.reachable,
+            final_url=url,
+            http_status=200,
+            content_type="text/html",
+            response_time_ms=12,
+            **metrics.model_dump(),
+        )
+
+
 class FailingBlogGenerator:
     def generate(self, project):
         raise ValueError("blog channel failed")
@@ -485,6 +574,7 @@ class TestContentWorkflow(unittest.TestCase):
         self.release_service = ContentReleaseService(
             Path(self.temp_dir.name) / "releases"
         )
+        self.publication_verifier = FakePublicationVerifier()
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
@@ -492,6 +582,9 @@ class TestContentWorkflow(unittest.TestCase):
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),
             release_service=self.release_service,
+            publication_service=ContentPublicationService(
+                verifier=self.publication_verifier
+            ),
         )
 
     def tearDown(self):
@@ -811,6 +904,86 @@ class TestContentWorkflow(unittest.TestCase):
             ContentReleaseRequest(
                 channels=[ContentChannel.blog],
                 planned_for=datetime(2026, 9, 1, 9, 0),
+            )
+
+    def test_records_publication_and_manual_metric_observations(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=[ContentChannel.blog]),
+        )
+        plan = released.release_plans[-1]
+
+        recorded = self.workflow.record_publication(
+            project.project_id,
+            PublicationReceiptRequest(
+                release_id=plan.release_id,
+                channel=ContentChannel.blog,
+                platform="ghost",
+                public_url="https://example.com/useful-guide",
+                published_at=datetime.now(timezone.utc),
+            ),
+        )
+        receipt = recorded.publication_receipts[-1]
+        observed = self.workflow.observe_publication(
+            project.project_id,
+            receipt.receipt_id,
+            PublicationObservationRequest(
+                views=120, likes=12, comments=3, shares=4, clicks=20
+            ),
+        )
+
+        receipt = observed.publication_receipts[-1]
+        self.assertFalse(receipt.external_action_performed_by_studio)
+        self.assertEqual(len(receipt.observations), 2)
+        self.assertEqual(receipt.observations[-1].views, 120)
+        self.assertEqual(receipt.observations[-1].metrics_source, "manual")
+        self.assertEqual(len(self.publication_verifier.calls), 2)
+
+    def test_stale_release_rejects_publication_receipt(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=[ContentChannel.blog]),
+        )
+        release_id = released.release_plans[-1].release_id
+        self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(channels=["blog"], regenerate=True),
+        )
+
+        with self.assertRaisesRegex(ValueError, "stale release"):
+            self.workflow.record_publication(
+                project.project_id,
+                PublicationReceiptRequest(
+                    release_id=release_id,
+                    channel=ContentChannel.blog,
+                    platform="other",
+                    public_url="https://example.com/stale",
+                    published_at=datetime.now(timezone.utc),
+                ),
+            )
+
+    def test_publication_time_requires_timezone(self):
+        with self.assertRaisesRegex(ValueError, "timezone offset"):
+            PublicationReceiptRequest(
+                release_id="release-1",
+                channel=ContentChannel.blog,
+                platform="other",
+                public_url="https://example.com/article",
+                published_at=datetime(2026, 9, 1, 9, 0),
             )
 
     def test_ghost_sync_rejects_changed_snapshot(self):

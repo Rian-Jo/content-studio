@@ -30,6 +30,8 @@ own output and status even when another channel has not started or has failed.
 - Automatic approval invalidation when a reviewed output is regenerated or changes
 - Approval-bound local release plans with checksummed manifests and ZIP export
   bundles for controlled handoff
+- Release-linked publication receipts with SSRF-safe public URL checks and manual
+  performance-observation history
 - A server-side Ghost Admin API integration limited to creating or updating drafts
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
@@ -40,7 +42,7 @@ amounts remain unavailable when the configured LLM adapter does not report usage
 Content Studio records this explicitly instead of inventing an estimate. Other
 roadmap items not implemented yet are long-video profiles, newsletter and social
 workflows, public or scheduled publishing, external video publishing, and
-post-publication analytics.
+provider-connected automatic analytics.
 
 ## Run Content Studio locally
 
@@ -68,6 +70,7 @@ Create project
   -> approve the exact output snapshot or request changes
   -> create a local release plan and checksummed ZIP handoff package
   -> optionally synchronize an approved blog to a Ghost draft
+  -> after manual publication elsewhere, record its public URL and observations
 ```
 
 Private, loopback, link-local, and credential-bearing source URLs are rejected.
@@ -86,6 +89,13 @@ records, selected channel output, and per-file SHA-256 digests. An optional
 `planned_for` value is handoff metadata only: Content Studio does not execute a
 scheduled publication. Rendered video files are not duplicated into the ZIP; the
 video plan records their filenames and makes that omission explicit.
+
+Publication tracking records only a URL that the user confirms was already
+published outside Content Studio. It verifies every redirect against public-network
+rules, records reachability and HTTP metadata, and accepts optional manual counts
+for views, likes, comments, shares, and clicks. It does not log in to a platform,
+publish content, scrape private analytics, or claim that manually entered metrics
+came from a provider API.
 
 ## Optional Ghost draft integration
 

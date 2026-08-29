@@ -1,5 +1,9 @@
 from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
+from app.services.content.publication import (
+    ContentPublicationService,
+    PublicationUrlVerifier,
+)
 from app.services.content.research import SourceResearcher
 from app.services.content.release import ContentReleaseService
 from app.services.content.review import ContentReviewService
@@ -14,8 +18,10 @@ __all__ = [
     "ContentWorkflow",
     "ContentReviewService",
     "ContentReleaseService",
+    "ContentPublicationService",
     "EvidenceBuilder",
     "MoneyPrinterVideoAdapter",
+    "PublicationUrlVerifier",
     "SourceResearcher",
     "VideoPlanGenerator",
 ]
