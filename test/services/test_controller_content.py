@@ -14,13 +14,13 @@ from app.services.content import (
     BlogGenerator,
     ContentStore,
     ContentWorkflow,
-    EvidenceBuilder,
 )
 
 from test.services.test_content_studio import (
+    FakeEvidenceBuilder,
     FakeResearcher,
+    FakeVideoGenerator,
     sample_blog_payload,
-    sample_evidence_payload,
 )
 
 
@@ -31,14 +31,12 @@ class TestContentControllerHTTP(unittest.TestCase):
         generator = BlogGenerator(
             responder=lambda _: json.dumps(sample_blog_payload())
         )
-        evidence_builder = EvidenceBuilder(
-            responder=lambda _: json.dumps(sample_evidence_payload())
-        )
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
             researcher=FakeResearcher(),
-            evidence_builder=evidence_builder,
+            evidence_builder=FakeEvidenceBuilder(),
+            video_generator=FakeVideoGenerator(),
         )
         self.original_workflow = content_controller._workflow
         content_controller._workflow = self.workflow
@@ -84,6 +82,40 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.assertEqual(generated.status_code, 200)
         self.assertEqual(generated.json()["data"]["blog_status"], "draft_complete")
         self.assertEqual(fetched.json()["data"]["blog_output"]["slug"], "useful-guide")
+
+    def test_fanout_and_video_refresh_endpoints(self):
+        created = self.client.post(
+            "/api/v1/content/projects",
+            json={"topic": "Independent fan-out", "requested_channels": ["blog"]},
+        )
+        project_id = created.json()["data"]["project_id"]
+        self.client.post(
+            f"/api/v1/content/projects/{project_id}/research",
+            json={"sources": [{"url": "https://example.com/research"}]},
+        )
+        self.client.post(
+            f"/api/v1/content/projects/{project_id}/evidence/approve",
+            json={},
+        )
+
+        fanout = self.client.post(
+            f"/api/v1/content/projects/{project_id}/fanout",
+            json={
+                "channels": ["blog", "short_video"],
+                "video_options": {"voice_name": "test-voice"},
+            },
+        )
+        refreshed = self.client.post(
+            f"/api/v1/content/projects/{project_id}/video/refresh"
+        )
+
+        self.assertEqual(fanout.status_code, 200)
+        self.assertEqual(fanout.json()["data"]["video_status"], "queued")
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.json()["data"]["video_status"], "complete")
+        self.assertEqual(
+            refreshed.json()["data"]["blog_status"], "draft_complete"
+        )
 
     def test_missing_ghost_environment_never_calls_external_publisher(self):
         project = self.workflow.create_project(

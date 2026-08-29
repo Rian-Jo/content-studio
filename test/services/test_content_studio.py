@@ -4,16 +4,26 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models.content import (
     BlogOutput,
     BlogStatus,
+    ChannelRunRecord,
+    ChannelRunStatus,
+    ConsistencyStatus,
+    ContentFanoutRequest,
     ContentProject,
     ContentProjectCreate,
     GhostPublication,
     GhostStatus,
+    VideoGenerationOptions,
+    VideoOutput,
+    VideoStatus,
 )
 from app.models.evidence import (
+    ClaimRecord,
+    EvidencePack,
     EvidenceStatus,
     ResearchRequest,
     SourceInput,
@@ -22,10 +32,14 @@ from app.models.evidence import (
 )
 from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
+from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher, ensure_public_http_url
 from app.services.content.store import ContentProjectNotFoundError, ContentStore
+from app.services.content.video_adapter import MoneyPrinterVideoAdapter
+from app.services.content.video_generator import VideoPlanGenerator
 from app.services.content.workflow import ContentWorkflow
 from app.services.publishers.ghost import GhostPublisher, GhostPublisherConfig
+from app.services.state import MemoryState
 
 
 def sample_blog_payload() -> dict:
@@ -50,6 +64,7 @@ def sample_blog_payload() -> dict:
         "meta_description": "Create and review a useful implementation guide before publishing.",
         "tags": ["automation", "guide"],
         "feature_image": None,
+        "evidence_claim_ids": ["claim-1"],
     }
 
 
@@ -92,12 +107,53 @@ def approved_project() -> ContentProject:
     evidence = EvidenceBuilder(
         responder=lambda _: json.dumps(sample_evidence_payload(source.source_id))
     ).build(ContentProject(topic="Test"), [source])
+    evidence.claims[0].claim_id = "claim-1"
     evidence.approved_at = datetime.now(timezone.utc)
     return ContentProject(
         topic="Test",
         evidence_pack=evidence,
         evidence_status=EvidenceStatus.approved,
     )
+
+
+def sample_video_payload(claim_id: str = "claim-1") -> dict:
+    return {
+        "title": "Evidence Video",
+        "hook": "What makes a content claim trustworthy?",
+        "narration": (
+            "A useful content workflow connects each factual claim to reviewed "
+            "evidence before it creates a channel-specific draft."
+        ),
+        "scenes": [
+            {
+                "narration": "Connect each claim to reviewed evidence.",
+                "visual_direction": "Show a claim linked to a source card.",
+            }
+        ],
+        "search_terms": ["evidence based content workflow"],
+        "caption": "Build content from reviewed evidence.",
+        "hashtags": ["content", "evidence"],
+        "evidence_claim_ids": [claim_id],
+    }
+
+
+class FakeEvidenceBuilder:
+    def build(self, project, sources):
+        return EvidencePack(
+            sources=sources,
+            claims=[
+                ClaimRecord(
+                    claim_id="claim-1",
+                    statement="The source supports a traceable content claim.",
+                    source_ids=[sources[0].source_id],
+                    confidence="high",
+                )
+            ],
+            key_messages=["Use reviewed evidence before drafting."],
+            counterpoints=["One source does not establish broad consensus."],
+            seo_keywords=["evidence based content"],
+            checked_at=datetime.now(timezone.utc),
+        )
 
 
 class TestContentStore(unittest.TestCase):
@@ -146,6 +202,84 @@ class TestBlogGenerator(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "approve an EvidencePack"):
             generator.generate(ContentProject(topic="Test"))
+
+
+class TestVideoPlanGenerator(unittest.TestCase):
+    def test_builds_video_plan_from_approved_claims(self):
+        generator = VideoPlanGenerator(
+            responder=lambda _: json.dumps(sample_video_payload())
+        )
+
+        output = generator.generate(approved_project())
+
+        self.assertEqual(output.evidence_claim_ids, ["claim-1"])
+        self.assertEqual(output.search_terms, ["evidence based content workflow"])
+
+    def test_rejects_unknown_evidence_claim(self):
+        generator = VideoPlanGenerator(
+            responder=lambda _: json.dumps(sample_video_payload("unknown-claim"))
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown evidence claim"):
+            generator.generate(approved_project())
+
+
+class TestMoneyPrinterVideoAdapter(unittest.TestCase):
+    def test_submits_existing_mpt_pipeline_without_cross_posting(self):
+        calls = []
+        state = MemoryState()
+        adapter = MoneyPrinterVideoAdapter(
+            plan_generator=VideoPlanGenerator(
+                responder=lambda _: json.dumps(sample_video_payload())
+            ),
+            scheduler=lambda func, **kwargs: calls.append((func, kwargs)),
+        )
+
+        with patch("app.services.content.video_adapter.sm.state", state):
+            output = adapter.generate(
+                approved_project(),
+                VideoGenerationOptions(
+                    video_source="pexels", voice_name="test-voice"
+                ),
+            )
+
+        _, kwargs = calls[0]
+        self.assertFalse(kwargs["allow_cross_post"])
+        self.assertEqual(kwargs["params"].video_script, output.narration)
+        self.assertEqual(kwargs["params"].video_terms, output.search_terms)
+        self.assertEqual(kwargs["params"].voice_name, "test-voice")
+
+    def test_refresh_collects_completed_video_files(self):
+        state = MemoryState()
+        output = VideoOutput.model_validate(sample_video_payload())
+        output.task_id = "video-task"
+        state.update_task(
+            "video-task",
+            state=1,
+            progress=100,
+            videos=["final.mp4"],
+        )
+        adapter = MoneyPrinterVideoAdapter(scheduler=lambda func, **kwargs: None)
+
+        with patch("app.services.content.video_adapter.sm.state", state):
+            status, refreshed, error = adapter.refresh(output)
+
+        self.assertEqual(status, VideoStatus.complete)
+        self.assertEqual(refreshed.rendered_files, ["final.mp4"])
+        self.assertIsNone(error)
+
+
+class TestContentConsistencyChecker(unittest.TestCase):
+    def test_flags_numbers_absent_from_approved_claims(self):
+        project = approved_project()
+        project.blog_output = BlogOutput.model_validate(sample_blog_payload())
+        project.blog_output.markdown += "\n\nAn unsupported result claims 99 percent."
+        project.video_output = VideoOutput.model_validate(sample_video_payload())
+
+        report = ContentConsistencyChecker().check(project)
+
+        self.assertEqual(report.status, ConsistencyStatus.warning)
+        self.assertIn("99", report.issues[0])
 
 
 class TestEvidenceBuilder(unittest.TestCase):
@@ -311,6 +445,30 @@ class FakeResearcher:
         return [sample_source()]
 
 
+class FakeVideoGenerator:
+    def __init__(self, error: str | None = None):
+        self.error = error
+
+    def generate(self, project, options):
+        if self.error:
+            raise ValueError(self.error)
+        output = VideoOutput.model_validate(sample_video_payload())
+        output.task_id = "mpt-video-1"
+        return output
+
+    def refresh(self, output):
+        return (
+            VideoStatus.complete,
+            output.model_copy(update={"rendered_files": ["final.mp4"]}),
+            None,
+        )
+
+
+class FailingBlogGenerator:
+    def generate(self, project):
+        raise ValueError("blog channel failed")
+
+
 class TestContentWorkflow(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -318,14 +476,12 @@ class TestContentWorkflow(unittest.TestCase):
         generator = BlogGenerator(
             responder=lambda _: json.dumps(sample_blog_payload())
         )
-        evidence_builder = EvidenceBuilder(
-            responder=lambda _: json.dumps(sample_evidence_payload())
-        )
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
             researcher=FakeResearcher(),
-            evidence_builder=evidence_builder,
+            evidence_builder=FakeEvidenceBuilder(),
+            video_generator=FakeVideoGenerator(),
         )
 
     def tearDown(self):
@@ -363,6 +519,95 @@ class TestContentWorkflow(unittest.TestCase):
 
         stored = self.workflow.store.get(project.project_id)
         self.assertEqual(stored.blog_status, BlogStatus.not_started)
+
+    def test_fanout_runs_blog_and_video_from_one_evidence_pack(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+
+        result = self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["blog", "short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+
+        self.assertEqual(result.blog_status, BlogStatus.draft_complete)
+        self.assertEqual(result.video_status, VideoStatus.queued)
+        self.assertEqual(result.video_output.task_id, "mpt-video-1")
+        self.assertEqual(
+            result.channel_runs["blog"].status, ChannelRunStatus.complete
+        )
+        self.assertEqual(
+            result.channel_runs["short_video"].status, ChannelRunStatus.queued
+        )
+        self.assertIsNone(
+            result.channel_runs["blog"].llm_usage.estimated_cost_usd
+        )
+        self.assertEqual(
+            result.consistency_report.status, ConsistencyStatus.passed
+        )
+
+    def test_blog_failure_does_not_cancel_video_channel(self):
+        workflow = ContentWorkflow(
+            store=self.workflow.store,
+            blog_generator=FailingBlogGenerator(),
+            video_generator=FakeVideoGenerator(),
+        )
+        project = approved_project()
+        workflow.store.save(project)
+
+        result = workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["blog", "short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+
+        self.assertEqual(result.blog_status, BlogStatus.failed)
+        self.assertEqual(result.video_status, VideoStatus.queued)
+        self.assertIsNotNone(result.video_output)
+
+    def test_video_failure_does_not_cancel_blog_channel(self):
+        workflow = ContentWorkflow(
+            store=self.workflow.store,
+            blog_generator=self.workflow.blog_generator,
+            video_generator=FakeVideoGenerator(error="video channel failed"),
+        )
+        project = approved_project()
+        workflow.store.save(project)
+
+        result = workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["blog", "short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+
+        self.assertEqual(result.blog_status, BlogStatus.draft_complete)
+        self.assertEqual(result.video_status, VideoStatus.failed)
+        self.assertIsNotNone(result.blog_output)
+
+    def test_refresh_video_preserves_blog_and_updates_video(self):
+        project = approved_project()
+        project.blog_output = BlogOutput.model_validate(sample_blog_payload())
+        project.blog_status = BlogStatus.draft_complete
+        project.video_output = VideoOutput.model_validate(sample_video_payload())
+        project.video_output.task_id = "mpt-video-1"
+        project.video_status = VideoStatus.queued
+        project.channel_runs["short_video"] = ChannelRunRecord(
+            status=ChannelRunStatus.queued,
+            started_at=datetime.now(timezone.utc),
+        )
+        self.workflow.store.save(project)
+
+        refreshed = self.workflow.refresh_video(project.project_id)
+
+        self.assertEqual(refreshed.video_status, VideoStatus.complete)
+        self.assertEqual(refreshed.video_output.rendered_files, ["final.mp4"])
+        self.assertEqual(refreshed.blog_status, BlogStatus.draft_complete)
 
 
 if __name__ == "__main__":

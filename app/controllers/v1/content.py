@@ -5,6 +5,7 @@ from fastapi import Depends, Query, Request
 from app.controllers import base
 from app.controllers.v1.base import new_router
 from app.models.content import (
+    ContentFanoutRequest,
     ContentProjectCreate,
     ContentProjectListResponse,
     ContentProjectResponse,
@@ -103,6 +104,42 @@ def approve_content_evidence(
 ):
     try:
         project = get_workflow().approve_evidence(project_id, body.note)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/fanout",
+    response_model=ContentProjectResponse,
+    summary="Run independent blog and short-video channels",
+)
+def run_content_fanout(
+    request: Request, project_id: str, body: ContentFanoutRequest
+):
+    try:
+        project = get_workflow().run_fanout(project_id, body)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/video/refresh",
+    response_model=ContentProjectResponse,
+    summary="Refresh the MoneyPrinterTurbo video task state",
+)
+def refresh_content_video(request: Request, project_id: str):
+    try:
+        project = get_workflow().refresh_video(project_id)
     except ContentProjectNotFoundError as exc:
         raise _not_found(request, project_id) from exc
     except ValueError as exc:

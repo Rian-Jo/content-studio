@@ -1236,6 +1236,48 @@ class TestTaskService(unittest.TestCase):
             **result,
         )
 
+    def test_content_studio_can_disable_configured_cross_posting(self):
+        """Content Studio rendering must never inherit automatic publication."""
+        params = VideoParams(video_subject="Evidence video")
+        service = tm.upload_post.upload_post_service
+
+        with (
+            patch.object(tm, "generate_script", return_value="reviewed script"),
+            patch.object(tm, "generate_terms", return_value=["evidence"]),
+            patch.object(tm, "save_script_data"),
+            patch.object(
+                tm, "generate_audio", return_value=("audio.mp3", 5, object())
+            ),
+            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
+            patch.object(
+                tm,
+                "generate_final_videos",
+                return_value=(["final.mp4"], ["combined.mp4"], []),
+            ),
+            patch.object(service, "is_configured", return_value=True),
+            patch.object(
+                type(service),
+                "auto_upload",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                type(service),
+                "platforms",
+                new_callable=PropertyMock,
+                return_value=["youtube"],
+            ),
+            patch.object(tm, "_schedule_cross_post") as schedule_cross_post,
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            result = tm.start(
+                "content-studio-video", params, allow_cross_post=False
+            )
+
+        self.assertIsNone(result["cross_post_state"])
+        schedule_cross_post.assert_not_called()
+
     def test_start_marks_pipeline_failures(self):
         """
         音频、素材和最终视频任一关键产物缺失时都必须进入失败状态，不能把

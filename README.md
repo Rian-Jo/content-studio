@@ -20,15 +20,21 @@ own output and status even when another channel has not started or has failed.
 - Local SQLite project-state storage
 - An independent `BlogWorkflow` that generates only from approved evidence and
   does not require video generation
+- Independent blog/short-video fan-out from the same approved `EvidencePack`
+- A `MoneyPrinterVideoAdapter` that submits evidence-derived narration and search
+  terms to the existing MoneyPrinterTurbo task queue
+- Per-channel status and LLM request records, plus deterministic claim/number
+  consistency checks across blog and video drafts
 - A server-side Ghost Admin API integration limited to creating or updating drafts
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
 
 Automatic source discovery and search-provider integrations are **not implemented**;
-the current research step verifies URLs supplied by the user. Other roadmap items
-not implemented yet are blog/video fan-out, the MoneyPrinterTurbo video adapter,
-newsletter and social workflows, unified publishing approval, and post-publication
-analytics.
+the current research step verifies URLs supplied by the user. Exact token and cost
+amounts remain unavailable when the configured LLM adapter does not report usage;
+Content Studio records this explicitly instead of inventing an estimate. Other
+roadmap items not implemented yet are long-video profiles, newsletter and social
+workflows, unified publishing approval, and post-publication analytics.
 
 ## Run Content Studio locally
 
@@ -51,12 +57,16 @@ Create project
   -> submit public source URLs
   -> verify sources and build claim-to-source links
   -> review and approve the EvidencePack
-  -> generate the blog draft
+  -> independently generate a blog draft and/or MPT short video
+  -> review channel status and the consistency report
   -> optionally synchronize a Ghost draft
 ```
 
 Private, loopback, link-local, and credential-bearing source URLs are rejected.
 Source text is treated as untrusted reference data, not as LLM instructions.
+Content Studio video jobs always disable MoneyPrinterTurbo cross-posting, even if
+automatic upload is configured elsewhere. Rendering can still use the configured
+LLM, TTS, and material-provider APIs and may incur their normal costs.
 
 ## Optional Ghost draft integration
 

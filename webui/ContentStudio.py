@@ -12,7 +12,13 @@ if str(root_dir) in sys.path:
     sys.path.remove(str(root_dir))
 sys.path.insert(0, str(root_dir))
 
-from app.models.content import ContentProjectCreate  # noqa: E402
+from app.config import config  # noqa: E402
+from app.models.content import (  # noqa: E402
+    ContentFanoutRequest,
+    ContentProjectCreate,
+    VideoGenerationOptions,
+    VideoStatus,
+)
 from app.models.evidence import (  # noqa: E402
     EvidenceStatus,
     ResearchRequest,
@@ -78,19 +84,23 @@ with left:
     st.subheader("상태")
     st.write(f"근거: `{project.evidence_status.value}`")
     st.write(f"블로그: `{project.blog_status.value}`")
+    st.write(f"영상: `{project.video_status.value}`")
     st.write(f"Ghost: `{project.ghost_status.value}`")
     st.write(f"검토: `{project.approval_status.value}`")
+    has_channel_output = (
+        project.blog_output is not None or project.video_output is not None
+    )
     with st.form("research-sources"):
         source_urls = st.text_area(
             "검증할 출처 URL",
             placeholder="https://example.com/source-1\nhttps://example.com/source-2",
             help="공개 HTTP/HTTPS 문서만 지원하며, 한 줄에 URL 하나씩 최대 10개입니다.",
-            disabled=project.blog_output is not None,
+            disabled=has_channel_output,
         )
         research = st.form_submit_button(
             "자료 조사 및 EvidencePack 만들기",
             use_container_width=True,
-            disabled=project.blog_output is not None,
+            disabled=has_channel_output,
         )
     if research:
         urls = [line.strip() for line in source_urls.splitlines() if line.strip()]
@@ -124,21 +134,93 @@ with left:
             st.success("EvidencePack을 승인했습니다.")
             st.rerun()
 
-    blog_enabled = project.evidence_status == EvidenceStatus.approved
-    if st.button(
-        "블로그 초안 생성",
-        type="primary",
-        use_container_width=True,
-        disabled=not blog_enabled,
-    ):
-        with st.spinner("블로그 초안을 생성하고 있습니다..."):
+    configured_source = config.app.get("video_source", "pexels")
+    safe_source = (
+        configured_source
+        if configured_source in {"pexels", "pixabay", "coverr"}
+        else "pexels"
+    )
+    with st.form("channel-fanout"):
+        selected_channels = st.multiselect(
+            "생성 채널",
+            options=["blog", "short_video"],
+            default=["blog"],
+            format_func=lambda value: {
+                "blog": "블로그",
+                "short_video": "숏폼 영상",
+            }[value],
+            disabled=project.evidence_status != EvidenceStatus.approved,
+        )
+        video_selected = "short_video" in selected_channels
+        video_source = st.selectbox(
+            "영상 소재 공급자",
+            ["pexels", "pixabay", "coverr"],
+            index=["pexels", "pixabay", "coverr"].index(safe_source),
+            disabled=not video_selected,
+        )
+        video_aspect = st.selectbox(
+            "영상 비율",
+            ["9:16", "16:9", "1:1"],
+            disabled=not video_selected,
+        )
+        voice_name = st.text_input(
+            "MPT 음성 ID",
+            value=str(config.ui.get("voice_name", "") or ""),
+            help="기존 MoneyPrinterTurbo에서 검증한 음성 ID를 사용하세요.",
+            disabled=not video_selected,
+        )
+        confirm_video_cost = st.checkbox(
+            "영상 생성 시 설정된 LLM·TTS·소재 API 비용이 발생할 수 있음을 확인했습니다.",
+            disabled=not video_selected,
+        )
+        fanout = st.form_submit_button(
+            "선택 채널 생성",
+            type="primary",
+            use_container_width=True,
+            disabled=(
+                project.evidence_status != EvidenceStatus.approved
+                or not selected_channels
+                or (
+                    video_selected
+                    and (not confirm_video_cost or not voice_name.strip())
+                )
+            ),
+        )
+    if fanout:
+        request = ContentFanoutRequest(
+            channels=selected_channels,
+            video_options=VideoGenerationOptions(
+                video_source=video_source,
+                video_aspect=video_aspect,
+                voice_name=voice_name.strip(),
+            ),
+        )
+        with st.spinner("선택한 채널을 독립적으로 실행하고 있습니다..."):
             try:
-                workflow().generate_blog(project.project_id)
+                workflow().run_fanout(project.project_id, request)
             except Exception as exc:
-                st.error(f"초안 생성 실패: {exc}")
+                st.error(f"채널 생성 시작 실패: {exc}")
             else:
-                st.success("블로그 초안을 생성했습니다.")
+                st.success("채널 작업 결과를 저장했습니다.")
                 st.rerun()
+
+    if project.video_status in {VideoStatus.queued, VideoStatus.rendering}:
+        if st.button("영상 작업 상태 새로고침", use_container_width=True):
+            try:
+                workflow().refresh_video(project.project_id)
+            except Exception as exc:
+                st.error(f"영상 상태 확인 실패: {exc}")
+            else:
+                st.rerun()
+
+    if project.channel_runs:
+        with st.expander("채널 실행·LLM 비용 기록"):
+            st.json(
+                {
+                    channel: run.model_dump(mode="json")
+                    for channel, run in project.channel_runs.items()
+                }
+            )
 
     ghost_ready = bool(os.getenv("GHOST_ADMIN_URL") and os.getenv("GHOST_ADMIN_API_KEY"))
     confirm_ghost = st.checkbox(
@@ -169,7 +251,9 @@ with left:
         st.caption("Ghost 연동은 서버 환경변수 설정 후 활성화됩니다.")
 
 with right:
-    evidence_tab, blog_tab = st.tabs(["Research & Evidence", "블로그 미리보기"])
+    evidence_tab, blog_tab, video_tab, quality_tab = st.tabs(
+        ["Research & Evidence", "블로그 미리보기", "영상", "일관성 검사"]
+    )
     with evidence_tab:
         if project.evidence_pack:
             st.subheader("검증된 출처")
@@ -220,3 +304,42 @@ with right:
                 )
         else:
             st.info("승인된 EvidencePack으로 초안을 생성하면 표시됩니다.")
+
+    with video_tab:
+        if project.video_output:
+            st.subheader(project.video_output.title)
+            st.write(project.video_output.hook)
+            st.caption(f"MPT task: {project.video_output.task_id}")
+            st.write(project.video_output.narration)
+            with st.expander("장면·검색어·게시문 초안"):
+                st.json(
+                    {
+                        "scenes": [
+                            scene.model_dump(mode="json")
+                            for scene in project.video_output.scenes
+                        ],
+                        "search_terms": project.video_output.search_terms,
+                        "caption": project.video_output.caption,
+                        "hashtags": project.video_output.hashtags,
+                        "evidence_claim_ids": (
+                            project.video_output.evidence_claim_ids
+                        ),
+                    }
+                )
+            for rendered_file in project.video_output.rendered_files:
+                if Path(rendered_file).is_file():
+                    st.video(rendered_file)
+        else:
+            st.info("숏폼 영상 채널을 선택하면 영상 계획과 MPT 작업이 표시됩니다.")
+
+    with quality_tab:
+        report = project.consistency_report
+        st.write(f"상태: `{report.status.value}`")
+        if report.issues:
+            for issue in report.issues:
+                st.warning(issue)
+        elif report.status.value == "passed":
+            st.success("승인된 주장 밖의 수치가 발견되지 않았습니다.")
+        else:
+            st.info("블로그와 영상 결과가 모두 준비되면 검사가 실행됩니다.")
+        st.json(report.model_dump(mode="json"))

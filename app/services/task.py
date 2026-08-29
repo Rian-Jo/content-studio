@@ -1246,6 +1246,7 @@ def _run_pipeline(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    allow_cross_post: bool = True,
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
@@ -1450,7 +1451,8 @@ def _run_pipeline(
     # 7. 先完成视频生成任务，再按需提交跨平台发布。第三方上传可能耗时
     # 数分钟，不应阻塞视频结果返回，也不能反向影响已经生成的成片。
     cross_post_enabled = (
-        upload_post.upload_post_service.is_configured()
+        allow_cross_post
+        and upload_post.upload_post_service.is_configured()
         and upload_post.upload_post_service.auto_upload
     )
     platforms = (
@@ -1510,12 +1512,16 @@ def start(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    allow_cross_post: bool = True,
 ):
     """
     执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。
 
     ``allow_server_file_input`` 只供本机 CLI 使用。HTTP API 和 WebUI 必须保持
     默认值，让自定义音频始终受当前任务目录约束。
+
+    ``allow_cross_post`` defaults to True to preserve existing video API behavior.
+    The Content Studio adapter passes False to prevent publication before review.
     """
     try:
         return _run_pipeline(
@@ -1525,6 +1531,7 @@ def start(
             voice_preview=voice_preview,
             loomloom_video_request=loomloom_video_request,
             allow_server_file_input=allow_server_file_input,
+            allow_cross_post=allow_cross_post,
         )
     except Exception as exc:
         logger.exception(

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.evidence import EvidencePack, EvidenceStatus
 
@@ -34,6 +34,28 @@ class GhostStatus(str, Enum):
     failed = "failed"
 
 
+class VideoStatus(str, Enum):
+    not_started = "not_started"
+    planning = "planning"
+    queued = "queued"
+    rendering = "rendering"
+    complete = "complete"
+    failed = "failed"
+
+
+class ChannelRunStatus(str, Enum):
+    running = "running"
+    queued = "queued"
+    complete = "complete"
+    failed = "failed"
+
+
+class ConsistencyStatus(str, Enum):
+    not_ready = "not_ready"
+    passed = "passed"
+    warning = "warning"
+
+
 class ApprovalStatus(str, Enum):
     waiting_for_review = "waiting_for_review"
     approved = "approved"
@@ -50,6 +72,78 @@ class BlogOutput(BaseModel):
     meta_description: str = Field(min_length=1, max_length=160)
     tags: list[str] = Field(default_factory=list, max_length=10)
     feature_image: str | None = None
+    evidence_claim_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class VideoScene(BaseModel):
+    narration: str = Field(min_length=1, max_length=1000)
+    visual_direction: str = Field(min_length=1, max_length=1000)
+
+
+class VideoOutput(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    hook: str = Field(min_length=1, max_length=500)
+    narration: str = Field(min_length=20, max_length=5000)
+    scenes: list[VideoScene] = Field(min_length=1, max_length=20)
+    search_terms: list[str] = Field(min_length=1, max_length=10)
+    caption: str = Field(min_length=1, max_length=2200)
+    hashtags: list[str] = Field(default_factory=list, max_length=20)
+    evidence_claim_ids: list[str] = Field(min_length=1, max_length=50)
+    task_id: str | None = None
+    rendered_files: list[str] = Field(default_factory=list)
+
+
+class LLMUsageRecord(BaseModel):
+    request_count: int = Field(default=0, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    measurement: Literal["reported", "estimated", "unavailable"] = "unavailable"
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ChannelRunRecord(BaseModel):
+    status: ChannelRunStatus
+    started_at: datetime
+    finished_at: datetime | None = None
+    llm_usage: LLMUsageRecord = Field(default_factory=LLMUsageRecord)
+    error: str | None = Field(default=None, max_length=1000)
+
+
+class ConsistencyReport(BaseModel):
+    status: ConsistencyStatus = ConsistencyStatus.not_ready
+    checked_at: datetime | None = None
+    issues: list[str] = Field(default_factory=list, max_length=50)
+    shared_claim_ids: list[str] = Field(default_factory=list, max_length=50)
+    blog_only_claim_ids: list[str] = Field(default_factory=list, max_length=50)
+    video_only_claim_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class VideoGenerationOptions(BaseModel):
+    video_aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
+    video_source: Literal["pexels", "pixabay", "coverr"] = "pexels"
+    voice_name: str = Field(default="", max_length=300)
+    bgm_type: str = Field(default="random", max_length=100)
+    bgm_volume: float = Field(default=0.2, ge=0, le=1)
+    subtitle_enabled: bool = True
+
+
+class ContentFanoutRequest(BaseModel):
+    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    video_options: VideoGenerationOptions = Field(
+        default_factory=VideoGenerationOptions
+    )
+
+    @model_validator(mode="after")
+    def reject_duplicate_channels(self) -> ContentFanoutRequest:
+        if len(self.channels) != len(set(self.channels)):
+            raise ValueError("fan-out channels must be unique")
+        if (
+            ContentChannel.short_video in self.channels
+            and not self.video_options.voice_name.strip()
+        ):
+            raise ValueError("video_options.voice_name is required for short video")
+        return self
 
 
 class GhostPublication(BaseModel):
@@ -75,6 +169,10 @@ class ContentProject(ContentProjectCreate):
     evidence_status: EvidenceStatus = EvidenceStatus.not_started
     blog_output: BlogOutput | None = None
     blog_status: BlogStatus = BlogStatus.not_started
+    video_output: VideoOutput | None = None
+    video_status: VideoStatus = VideoStatus.not_started
+    channel_runs: dict[str, ChannelRunRecord] = Field(default_factory=dict)
+    consistency_report: ConsistencyReport = Field(default_factory=ConsistencyReport)
     ghost_status: GhostStatus = GhostStatus.not_configured
     ghost_publication: GhostPublication | None = None
     approval_status: ApprovalStatus = ApprovalStatus.waiting_for_review
