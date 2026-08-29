@@ -19,7 +19,10 @@ from app.models.content import (
     ContentProjectCreate,
     ContentReleaseRequest,
     ContentReviewRequest,
+    ExternalJobStatus,
+    ExternalVideoPublishRequest,
     GhostPublication,
+    GhostPublicationRequest,
     GhostStatus,
     PublicationObservation,
     PublicationObservationRequest,
@@ -43,7 +46,12 @@ from app.models.evidence import (
     SourceVerificationStatus,
 )
 from app.services.content.blog_generator import BlogGenerator
+from app.services.content.distribution_generator import (
+    NewsletterGenerator,
+    SocialGenerator,
+)
 from app.services.content.evidence_builder import EvidenceBuilder
+from app.services.content.external_distribution import ContentExternalDistributionService
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.publication import (
     ContentPublicationService,
@@ -155,6 +163,46 @@ def sample_video_payload(claim_id: str = "claim-1") -> dict:
     }
 
 
+def sample_newsletter_payload(claim_id: str = "claim-1") -> dict:
+    markdown = (
+        "# Evidence briefing\n\nThis edition explains how reviewed evidence supports "
+        "a traceable content workflow.\n\n## Takeaway\n\nReview the linked claims "
+        "before adapting this draft for an audience."
+    )
+    html = (
+        "<h1>Evidence briefing</h1><p>This edition explains how reviewed evidence "
+        "supports a traceable content workflow.</p><h2>Takeaway</h2><p>Review the "
+        "linked claims before adapting this draft for an audience.</p>"
+    )
+    return {
+        "subject": "Evidence briefing",
+        "preview_text": "A traceable approach to content creation.",
+        "markdown": markdown,
+        "html": html,
+        "call_to_action": "Review the approved evidence pack.",
+        "evidence_claim_ids": [claim_id],
+    }
+
+
+def sample_social_payload(claim_id: str = "claim-1") -> dict:
+    return {
+        "campaign_summary": "Platform-specific drafts based on reviewed evidence.",
+        "posts": [
+            {
+                "platform": "linkedin",
+                "content": "Build content from claims that reviewers can trace.",
+                "hashtags": ["content", "evidence"],
+            },
+            {
+                "platform": "x",
+                "content": "Trace claims to reviewed evidence before drafting.",
+                "hashtags": ["contentops"],
+            },
+        ],
+        "evidence_claim_ids": [claim_id],
+    }
+
+
 class FakeEvidenceBuilder:
     def build(self, project, sources):
         return EvidencePack(
@@ -220,6 +268,30 @@ class TestBlogGenerator(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "approve an EvidencePack"):
             generator.generate(ContentProject(topic="Test"))
+
+
+class TestDistributionGenerators(unittest.TestCase):
+    def test_builds_newsletter_and_social_drafts_from_approved_claims(self):
+        project = approved_project()
+        newsletter = NewsletterGenerator(
+            responder=lambda _: json.dumps(sample_newsletter_payload())
+        ).generate(project)
+        social = SocialGenerator(
+            responder=lambda _: json.dumps(sample_social_payload())
+        ).generate(project)
+
+        self.assertEqual(newsletter.subject, "Evidence briefing")
+        self.assertEqual(newsletter.evidence_claim_ids, ["claim-1"])
+        self.assertEqual([post.platform for post in social.posts], ["linkedin", "x"])
+        self.assertEqual(social.evidence_claim_ids, ["claim-1"])
+
+    def test_rejects_distribution_draft_with_unknown_claim(self):
+        generator = SocialGenerator(
+            responder=lambda _: json.dumps(sample_social_payload("unknown-claim"))
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown evidence claim"):
+            generator.generate(approved_project())
 
 
 class TestVideoPlanGenerator(unittest.TestCase):
@@ -606,6 +678,19 @@ class TestGhostPublisher(unittest.TestCase):
             kwargs["json"]["posts"][0]["updated_at"], existing.updated_at
         )
 
+    def test_explicitly_publishes_an_existing_draft(self):
+        existing = GhostPublication(
+            post_id="post-123", updated_at="2026-08-29T00:00:00.000Z"
+        )
+
+        publication = self.publisher.publish(self.blog, existing)
+
+        method, url, kwargs = self.session.calls[0]
+        self.assertEqual(method, "PUT")
+        self.assertIn("posts/post-123/", url)
+        self.assertEqual(kwargs["json"]["posts"][0]["status"], "published")
+        self.assertEqual(publication.status, "published")
+
 
 class FakePublisher:
     def __init__(self):
@@ -614,6 +699,14 @@ class FakePublisher:
     def sync_draft(self, blog, existing=None):
         self.existing = existing
         return GhostPublication(post_id="ghost-1", updated_at="now")
+
+    def publish(self, blog, existing, scheduled_for=None):
+        return GhostPublication(
+            post_id=existing.post_id,
+            updated_at="later",
+            status="scheduled" if scheduled_for else "published",
+            published_at=scheduled_for,
+        )
 
 
 class FakeResearcher:
@@ -677,6 +770,31 @@ class FakePublicationVerifier:
         )
 
 
+class FakeExternalVideoGateway:
+    def __init__(self):
+        self.submissions = []
+
+    def submit_video(
+        self, video_path, title, caption, platforms, scheduled_for, idempotency_key
+    ):
+        self.submissions.append(
+            (video_path, title, caption, platforms, scheduled_for, idempotency_key)
+        )
+        return {"success": True, "request_id": "provider-request-1"}
+
+    def status(self, provider_request_id, provider_job_id):
+        return {"status": "completed"}
+
+    def analytics(self, provider_request_id):
+        return {
+            "youtube": {
+                "views": 321,
+                "likes": 12,
+                "private_token": "must-not-be-stored",
+            }
+        }
+
+
 class FailingBlogGenerator:
     def generate(self, project):
         raise ValueError("blog channel failed")
@@ -694,9 +812,16 @@ class TestContentWorkflow(unittest.TestCase):
         )
         self.publication_verifier = FakePublicationVerifier()
         self.search_provider = FakeSearchProvider()
+        self.external_gateway = FakeExternalVideoGateway()
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
+            newsletter_generator=NewsletterGenerator(
+                responder=lambda _: json.dumps(sample_newsletter_payload())
+            ),
+            social_generator=SocialGenerator(
+                responder=lambda _: json.dumps(sample_social_payload())
+            ),
             researcher=FakeResearcher(),
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),
@@ -705,6 +830,10 @@ class TestContentWorkflow(unittest.TestCase):
                 verifier=self.publication_verifier
             ),
             search_provider=self.search_provider,
+            external_distribution_service=ContentExternalDistributionService(
+                gateway=self.external_gateway,
+                media_root=self.temp_dir.name,
+            ),
         )
 
     def tearDown(self):
@@ -737,6 +866,32 @@ class TestContentWorkflow(unittest.TestCase):
         self.assertEqual(synced.blog_status, BlogStatus.draft_complete)
         self.assertEqual(synced.ghost_status, GhostStatus.draft_created)
         self.assertEqual(synced.ghost_publication.post_id, "ghost-1")
+
+    def test_ghost_publication_requires_release_and_explicit_confirmation(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.generate_blog(project.project_id)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=["blog"]),
+        )
+        self.workflow.sync_ghost_draft(project.project_id, FakePublisher())
+
+        published = self.workflow.publish_ghost(
+            project.project_id,
+            GhostPublicationRequest(
+                release_id=released.release_plans[-1].release_id,
+                action="publish",
+                confirm_external_action=True,
+            ),
+            FakePublisher(),
+        )
+
+        self.assertEqual(published.ghost_publication.status, "published")
 
     def test_blog_generation_is_blocked_until_evidence_is_approved(self):
         project = self.workflow.create_project(
@@ -795,6 +950,45 @@ class TestContentWorkflow(unittest.TestCase):
         self.assertEqual(
             result.consistency_report.status, ConsistencyStatus.passed
         )
+
+    def test_fanout_reviews_and_exports_newsletter_and_social(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+
+        generated = self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(channels=["newsletter", "social"]),
+        )
+
+        self.assertEqual(generated.newsletter_status, BlogStatus.draft_complete)
+        self.assertEqual(generated.social_status, BlogStatus.draft_complete)
+        self.assertEqual(generated.consistency_report.status, ConsistencyStatus.passed)
+        self.assertEqual(
+            set(generated.consistency_report.channel_claim_ids),
+            {"newsletter", "social"},
+        )
+
+        reviewed = self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        self.assertEqual(
+            reviewed.review_record.reviewed_channels,
+            [ContentChannel.newsletter, ContentChannel.social],
+        )
+
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=["newsletter", "social"]),
+        )
+        archive_path = (
+            self.release_service.storage_root / released.release_plans[-1].archive_path
+        )
+        with zipfile.ZipFile(archive_path) as archive:
+            archived_names = set(archive.namelist())
+        self.assertIn("newsletter/newsletter.md", archived_names)
+        self.assertIn("newsletter/newsletter.html", archived_names)
+        self.assertIn("social/posts.json", archived_names)
 
     def test_blog_failure_does_not_cancel_video_channel(self):
         workflow = ContentWorkflow(
@@ -1016,6 +1210,68 @@ class TestContentWorkflow(unittest.TestCase):
         self.assertFalse(video_plan["media_files_copied"])
         self.assertIn("short-video/plan.json", archived_names)
         self.assertNotIn("final.mp4", archived_names)
+
+    def test_external_video_publish_requires_confirmation_and_tracks_provider_metrics(self):
+        project = approved_project()
+        self.workflow.store.save(project)
+        self.workflow.run_fanout(
+            project.project_id,
+            ContentFanoutRequest(
+                channels=["short_video"],
+                video_options=VideoGenerationOptions(voice_name="test-voice"),
+            ),
+        )
+        self.workflow.refresh_video(project.project_id)
+        rendered = Path(self.temp_dir.name) / "approved-video.mp4"
+        rendered.write_bytes(b"video-test-data")
+        project = self.workflow.store.get(project.project_id)
+        project.video_output.rendered_files = [str(rendered)]
+        self.workflow.store.save(project)
+        self.workflow.review_project(
+            project.project_id,
+            ContentReviewRequest(decision=ReviewDecision.approve),
+        )
+        released = self.workflow.create_release_plan(
+            project.project_id,
+            ContentReleaseRequest(channels=["short_video"]),
+        )
+        release_id = released.release_plans[-1].release_id
+
+        published = self.workflow.publish_external_video(
+            project.project_id,
+            ExternalVideoPublishRequest(
+                release_id=release_id,
+                platforms=["youtube"],
+                confirm_external_action=True,
+            ),
+        )
+        job = published.external_publication_jobs[-1]
+        self.assertEqual(job.status, ExternalJobStatus.submitted)
+        self.assertEqual(job.provider_request_id, "provider-request-1")
+        self.assertEqual(len(self.external_gateway.submissions), 1)
+
+        refreshed = self.workflow.refresh_external_publication(
+            project.project_id, job.job_id
+        )
+        self.assertEqual(
+            refreshed.external_publication_jobs[-1].status,
+            ExternalJobStatus.completed,
+        )
+        observed = self.workflow.refresh_external_analytics(
+            project.project_id, job.job_id
+        )
+        metrics = observed.external_publication_jobs[-1].analytics[-1].metrics
+        self.assertEqual(metrics, {"youtube.views": 321, "youtube.likes": 12})
+
+        with self.assertRaisesRegex(ValueError, "already submitted"):
+            self.workflow.publish_external_video(
+                project.project_id,
+                ExternalVideoPublishRequest(
+                    release_id=release_id,
+                    platforms=["youtube"],
+                    confirm_external_action=True,
+                ),
+            )
 
     def test_regeneration_marks_existing_release_plan_stale(self):
         project = approved_project()

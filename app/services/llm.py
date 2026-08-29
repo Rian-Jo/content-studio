@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import perf_counter
 from typing import List
 
@@ -42,6 +44,62 @@ Generate a script for a video, depending on the subject of the video.
 7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
 8. respond in the same language as the video subject.
 """.strip()
+
+_usage_capture: ContextVar[list[dict] | None] = ContextVar(
+    "llm_usage_capture", default=None
+)
+
+
+@contextmanager
+def capture_usage():
+    """Collect provider-reported token usage for calls in the current context."""
+    records: list[dict] = []
+    token = _usage_capture.set(records)
+    try:
+        yield records
+    finally:
+        _usage_capture.reset(token)
+
+
+def _begin_usage_record(provider: str, model: str) -> dict | None:
+    records = _usage_capture.get()
+    if records is None:
+        return None
+    record = {
+        "provider": provider,
+        "model": model,
+        "input_tokens": None,
+        "output_tokens": None,
+        "measurement": "unavailable",
+    }
+    records.append(record)
+    return record
+
+
+def _usage_value(usage, *names: str) -> int | None:
+    for name in names:
+        value = _get_response_field(usage, name)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
+def _finish_usage_record(record: dict | None, response) -> None:
+    if record is None or response is None:
+        return
+    usage = _get_response_field(response, "usage") or _get_response_field(
+        response, "usage_metadata"
+    )
+    if usage is None:
+        return
+    record["input_tokens"] = _usage_value(
+        usage, "prompt_tokens", "input_tokens", "prompt_token_count"
+    )
+    record["output_tokens"] = _usage_value(
+        usage, "completion_tokens", "output_tokens", "candidates_token_count"
+    )
+    if record["input_tokens"] is not None or record["output_tokens"] is not None:
+        record["measurement"] = "reported"
 
 
 def _normalize_text_response(content, llm_provider: str) -> str:
@@ -156,6 +214,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
         api_key = runtime_app_config.get(provider.config_key("api_key"), "")
         configured_model = runtime_app_config.get(provider.config_key("model_name"), "")
         model_name = provider.resolve_model_name(configured_model)
+        usage_record = _begin_usage_record(llm_provider, model_name)
         if configured_model and model_name != configured_model:
             logger.warning(
                 f"{llm_provider} model '{configured_model}' is deprecated, "
@@ -231,7 +290,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
                             f'[{llm_provider}] returned an error response: "{response}"'
                         )
 
-                    return _extract_qwen_generation_text(response)
+                    text = _extract_qwen_generation_text(response)
+                    _finish_usage_record(usage_record, response)
+                    return text
                 else:
                     raise Exception(
                         f'[{llm_provider}] returned an invalid response: "{response}"'
@@ -286,6 +347,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 logger.warning(f"gemini returned invalid response content: {str(e)}")
                 raise ValueError(f"[{llm_provider}] returned invalid response content")
 
+            _finish_usage_record(usage_record, response)
             return _normalize_text_response(generated_text, llm_provider)
 
         if adapter == "cloudflare_ai_gateway":
@@ -305,7 +367,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return _extract_chat_completion_text(response, llm_provider)
+            text = _extract_chat_completion_text(response, llm_provider)
+            _finish_usage_record(usage_record, response)
+            return text
 
         if adapter == "litellm":
             import litellm
@@ -326,7 +390,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
             if not getattr(response, "choices", None):
                 raise ValueError(f"[{llm_provider}] returned empty response")
 
-            return _extract_chat_completion_text(response, llm_provider)
+            text = _extract_chat_completion_text(response, llm_provider)
+            _finish_usage_record(usage_record, response)
+            return text
 
         if adapter == "azure":
             # Azure OpenAI SDK 使用 `azure_endpoint` 和 `api_version` 生成专用请求地址，
@@ -344,7 +410,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
             )
             if response:
                 if isinstance(response, ChatCompletion):
-                    return _extract_chat_completion_text(response, llm_provider)
+                    text = _extract_chat_completion_text(response, llm_provider)
+                    _finish_usage_record(usage_record, response)
+                    return text
                 else:
                     raise Exception(
                         f'[{llm_provider}] returned an invalid response: "{response}", please check your network '
@@ -357,6 +425,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
 
         if adapter == "modelscope":
             content = ""
+            last_chunk = None
             client = OpenAI(
                 api_key=api_key,
                 base_url=base_url,
@@ -369,6 +438,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
             )
             if response:
                 for chunk in response:
+                    last_chunk = chunk
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
@@ -378,6 +448,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 if not content.strip():
                     raise ValueError("Empty content in stream response")
 
+                _finish_usage_record(usage_record, last_chunk)
                 return _normalize_text_response(content, llm_provider)
             else:
                 raise Exception(f"[{llm_provider}] returned an empty response")
@@ -392,7 +463,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
         )
         if response:
             if isinstance(response, ChatCompletion):
-                return _extract_chat_completion_text(response, llm_provider)
+                text = _extract_chat_completion_text(response, llm_provider)
+                _finish_usage_record(usage_record, response)
+                return text
             else:
                 raise Exception(
                     f'[{llm_provider}] returned an invalid response: "{response}", please check your network '

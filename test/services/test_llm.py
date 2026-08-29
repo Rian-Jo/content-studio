@@ -715,7 +715,8 @@ class TestLiteLLMProvider(unittest.TestCase):
                 self.kwargs = kwargs
                 message = types.SimpleNamespace(content="hello\npollinations")
                 choice = types.SimpleNamespace(message=message)
-                return types.SimpleNamespace(choices=[choice])
+                usage = types.SimpleNamespace(prompt_tokens=12, completion_tokens=4)
+                return types.SimpleNamespace(choices=[choice], usage=usage)
 
         fake_completions = FakeCompletions()
         fake_client = types.SimpleNamespace(
@@ -726,7 +727,8 @@ class TestLiteLLMProvider(unittest.TestCase):
             patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
             patch.object(llm, "ChatCompletion", types.SimpleNamespace),
         ):
-            result = llm._generate_response("Say hello")
+            with llm.capture_usage() as usage_records:
+                result = llm._generate_response("Say hello")
 
         openai_client.assert_called_once_with(
             api_key="pollinations-test-key",
@@ -740,6 +742,9 @@ class TestLiteLLMProvider(unittest.TestCase):
             },
         )
         self.assertEqual(result, "hello\npollinations")
+        self.assertEqual(usage_records[0]["input_tokens"], 12)
+        self.assertEqual(usage_records[0]["output_tokens"], 4)
+        self.assertEqual(usage_records[0]["measurement"], "reported")
 
     def test_anthropic_uses_openai_compatible_chat_completions(self):
         """Claude 走 Anthropic 的 OpenAI 兼容端点，不需要额外适配器分支。"""

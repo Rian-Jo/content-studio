@@ -35,7 +35,7 @@ class GhostPublisherConfig:
 
 
 class GhostPublisher:
-    """Server-side Ghost Admin API client limited to draft create/update."""
+    """Server-side Ghost Admin API client with explicit status transitions."""
 
     def __init__(self, config: GhostPublisherConfig, session=None):
         self.config = config
@@ -108,4 +108,52 @@ class GhostPublisher:
             updated_at=result["updated_at"],
             status="draft",
             url=result.get("url"),
+        )
+
+    def publish(
+        self,
+        blog: BlogOutput,
+        existing: GhostPublication,
+        scheduled_for=None,
+    ) -> GhostPublication:
+        if existing.status != "draft":
+            raise ValueError("only an existing Ghost draft can be published or scheduled")
+        status = "scheduled" if scheduled_for is not None else "published"
+        post = {
+            "title": blog.title,
+            "slug": blog.slug,
+            "custom_excerpt": blog.excerpt,
+            "html": blog.html,
+            "meta_title": blog.seo_title,
+            "meta_description": blog.meta_description,
+            "tags": [{"name": tag} for tag in blog.tags],
+            "status": status,
+            "updated_at": existing.updated_at,
+        }
+        if blog.feature_image:
+            post["feature_image"] = blog.feature_image
+        if scheduled_for is not None:
+            post["published_at"] = scheduled_for.isoformat()
+        response = self._session.request(
+            "PUT",
+            urljoin(self._api_base(), f"posts/{existing.post_id}/?source=html"),
+            headers={
+                "Authorization": f"Ghost {self._token()}",
+                "Accept-Version": self.config.api_version,
+                "Content-Type": "application/json",
+            },
+            json={"posts": [post]},
+            timeout=self.config.timeout_seconds,
+        )
+        response.raise_for_status()
+        posts = response.json().get("posts", [])
+        if not posts:
+            raise ValueError("Ghost returned no post after publication transition")
+        result = posts[0]
+        return GhostPublication(
+            post_id=result["id"],
+            updated_at=result["updated_at"],
+            status=status,
+            url=result.get("url"),
+            published_at=result.get("published_at"),
         )

@@ -11,10 +11,13 @@ from app.models.content import (
     ContentProjectCreate,
     ContentReleaseRequest,
     ContentReviewRequest,
+    ExternalVideoPublishRequest,
     GhostStatus,
+    GhostPublicationRequest,
     LLMUsageRecord,
     PublicationObservationRequest,
     PublicationReceiptRequest,
+    ReleasePlanStatus,
     VideoStatus,
     utc_now,
 )
@@ -26,6 +29,11 @@ from app.models.evidence import (
 )
 from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
+from app.services.content.external_distribution import ContentExternalDistributionService
+from app.services.content.distribution_generator import (
+    NewsletterGenerator,
+    SocialGenerator,
+)
 from app.services.content.quality_gate import ContentConsistencyChecker
 from app.services.content.research import SourceResearcher
 from app.services.content.publication import ContentPublicationService
@@ -35,6 +43,7 @@ from app.services.content.search import BraveSearchProvider, SearchProvider
 from app.services.content.store import ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter, VideoGenerator
 from app.services.publishers.base import DraftPublisher
+from app.services import llm
 
 
 class ContentWorkflow:
@@ -45,17 +54,22 @@ class ContentWorkflow:
         researcher: SourceResearcher | None = None,
         evidence_builder: EvidenceBuilder | None = None,
         video_generator: VideoGenerator | None = None,
+        newsletter_generator: NewsletterGenerator | None = None,
+        social_generator: SocialGenerator | None = None,
         consistency_checker: ContentConsistencyChecker | None = None,
         review_service: ContentReviewService | None = None,
         release_service: ContentReleaseService | None = None,
         publication_service: ContentPublicationService | None = None,
         search_provider: SearchProvider | None = None,
+        external_distribution_service: ContentExternalDistributionService | None = None,
     ):
         self.store = store or ContentStore()
         self.blog_generator = blog_generator or BlogGenerator()
         self.researcher = researcher or SourceResearcher()
         self.evidence_builder = evidence_builder or EvidenceBuilder()
         self.video_generator = video_generator or MoneyPrinterVideoAdapter()
+        self.newsletter_generator = newsletter_generator or NewsletterGenerator()
+        self.social_generator = social_generator or SocialGenerator()
         self.consistency_checker = consistency_checker or ContentConsistencyChecker()
         self.review_service = review_service or ContentReviewService()
         self.release_service = release_service or ContentReleaseService(
@@ -65,6 +79,11 @@ class ContentWorkflow:
             review_service=self.review_service
         )
         self.search_provider = search_provider or BraveSearchProvider()
+        self.external_distribution_service = (
+            external_distribution_service or ContentExternalDistributionService(
+                review_service=self.review_service
+            )
+        )
 
     def create_project(self, request: ContentProjectCreate) -> ContentProject:
         return self.store.save(ContentProject(**request.model_dump()))
@@ -76,7 +95,7 @@ class ContentWorkflow:
         preserve_discovery: bool = False,
     ) -> ContentProject:
         project = self.store.get(project_id)
-        if project.blog_output is not None or project.video_output is not None:
+        if self._has_channel_output(project):
             raise ValueError(
                 "evidence cannot be replaced after a channel output exists; "
                 "create a new content project instead"
@@ -102,7 +121,7 @@ class ContentWorkflow:
         self, project_id: str, request: SourceDiscoveryRequest
     ) -> ContentProject:
         project = self.store.get(project_id)
-        if project.blog_output is not None or project.video_output is not None:
+        if self._has_channel_output(project):
             raise ValueError(
                 "sources cannot be discovered after a channel output exists; "
                 "create a new content project instead"
@@ -160,10 +179,12 @@ class ContentWorkflow:
         )
         self.store.save(project)
         try:
-            project.blog_output = self.blog_generator.generate(project)
+            with llm.capture_usage() as usage_records:
+                project.blog_output = self.blog_generator.generate(project)
             project.blog_status = BlogStatus.draft_complete
             project.ghost_status = GhostStatus.ready
             blog_run = project.channel_runs[ContentChannel.blog.value]
+            blog_run.llm_usage = self._llm_usage(usage_records)
             blog_run.status = ChannelRunStatus.complete
             blog_run.finished_at = utc_now()
         except Exception as exc:
@@ -179,7 +200,33 @@ class ContentWorkflow:
         return self.store.save(project)
 
     @staticmethod
-    def _llm_usage() -> LLMUsageRecord:
+    def _llm_usage(records: list[dict] | None = None) -> LLMUsageRecord:
+        if records:
+            reported = [record for record in records if record["measurement"] == "reported"]
+            providers = {record["provider"] for record in records}
+            models = {record["model"] for record in records}
+            return LLMUsageRecord(
+                request_count=len(records),
+                provider=providers.pop() if len(providers) == 1 else "multiple",
+                model=models.pop() if len(models) == 1 else "multiple",
+                input_tokens=(
+                    sum(record["input_tokens"] or 0 for record in records)
+                    if reported
+                    else None
+                ),
+                output_tokens=(
+                    sum(record["output_tokens"] or 0 for record in records)
+                    if reported
+                    else None
+                ),
+                measurement="reported" if len(reported) == len(records) else "unavailable",
+                note=(
+                    "Token counts are reported by the configured provider; pricing "
+                    "is not inferred."
+                    if len(reported) == len(records)
+                    else "At least one provider response did not report token usage."
+                ),
+            )
         return LLMUsageRecord(
             request_count=1,
             measurement="unavailable",
@@ -188,6 +235,12 @@ class ContentWorkflow:
                 "usage or provider pricing, so cost is not fabricated."
             ),
         )
+
+    @staticmethod
+    def _generate_with_usage(func, args):
+        with llm.capture_usage() as records:
+            output = func(*args)
+        return output, records
 
     def run_fanout(
         self, project_id: str, request: ContentFanoutRequest
@@ -253,6 +306,26 @@ class ContentWorkflow:
                 (snapshot, request.video_options),
             )
 
+        for channel, output, generator in (
+            (
+                ContentChannel.newsletter,
+                project.newsletter_output,
+                self.newsletter_generator,
+            ),
+            (ContentChannel.social, project.social_output, self.social_generator),
+        ):
+            if channel in request.channels and (output is None or request.regenerate):
+                if channel == ContentChannel.newsletter:
+                    project.newsletter_status = BlogStatus.generating
+                else:
+                    project.social_status = BlogStatus.generating
+                project.channel_runs[channel.value] = ChannelRunRecord(
+                    status=ChannelRunStatus.running,
+                    started_at=started_at,
+                    llm_usage=self._llm_usage(),
+                )
+                operations[channel] = (generator.generate, (snapshot,))
+
         if operations or previous_channels != request.channels:
             self._invalidate_downstream(
                 project, "channel selection or output generation changed"
@@ -265,14 +338,14 @@ class ContentWorkflow:
 
         with ThreadPoolExecutor(max_workers=len(operations)) as executor:
             future_channels = {
-                executor.submit(func, *args): channel
+                executor.submit(self._generate_with_usage, func, args): channel
                 for channel, (func, args) in operations.items()
             }
             for future in as_completed(future_channels):
                 channel = future_channels[future]
                 run = project.channel_runs[channel.value]
                 try:
-                    output = future.result()
+                    output, usage_records = future.result()
                 except Exception as exc:
                     run.status = ChannelRunStatus.failed
                     run.finished_at = utc_now()
@@ -280,19 +353,34 @@ class ContentWorkflow:
                     project.last_error = f"{channel.value}: {exc}"
                     if channel == ContentChannel.blog:
                         project.blog_status = BlogStatus.failed
-                    else:
+                    elif channel == ContentChannel.short_video:
                         project.video_status = VideoStatus.failed
+                    elif channel == ContentChannel.newsletter:
+                        project.newsletter_status = BlogStatus.failed
+                    else:
+                        project.social_status = BlogStatus.failed
                 else:
+                    run.llm_usage = self._llm_usage(usage_records)
                     if channel == ContentChannel.blog:
                         project.blog_output = output
                         project.blog_status = BlogStatus.draft_complete
                         project.ghost_status = GhostStatus.ready
                         run.status = ChannelRunStatus.complete
                         run.finished_at = utc_now()
-                    else:
+                    elif channel == ContentChannel.short_video:
                         project.video_output = output
                         project.video_status = VideoStatus.queued
                         run.status = ChannelRunStatus.queued
+                    elif channel == ContentChannel.newsletter:
+                        project.newsletter_output = output
+                        project.newsletter_status = BlogStatus.draft_complete
+                        run.status = ChannelRunStatus.complete
+                        run.finished_at = utc_now()
+                    else:
+                        project.social_output = output
+                        project.social_status = BlogStatus.draft_complete
+                        run.status = ChannelRunStatus.complete
+                        run.finished_at = utc_now()
                 self.store.save(project)
 
         project.consistency_report = self.consistency_checker.check(project)
@@ -365,6 +453,32 @@ class ContentWorkflow:
         project.last_error = None
         return self.store.save(project)
 
+    def publish_external_video(
+        self, project_id: str, request: ExternalVideoPublishRequest
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.external_distribution_service.publish_video(project, request)
+        project.last_error = None
+        return self.store.save(project)
+
+    def refresh_external_publication(
+        self, project_id: str, job_id: str
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.external_distribution_service.refresh(project, job_id)
+        project.last_error = None
+        return self.store.save(project)
+
+    def refresh_external_analytics(
+        self, project_id: str, job_id: str
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        project = self.external_distribution_service.refresh_analytics(
+            project, job_id
+        )
+        project.last_error = None
+        return self.store.save(project)
+
     def sync_ghost_draft(
         self, project_id: str, publisher: DraftPublisher
     ) -> ContentProject:
@@ -389,6 +503,59 @@ class ContentWorkflow:
             raise
         return self.store.save(project)
 
+    def publish_ghost(
+        self,
+        project_id: str,
+        request: GhostPublicationRequest,
+        publisher,
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        if project.blog_output is None or project.ghost_publication is None:
+            raise ValueError("create an approved Ghost draft before publication")
+        self.review_service.require_current_channel_approval(
+            project, ContentChannel.blog
+        )
+        release = next(
+            (plan for plan in project.release_plans if plan.release_id == request.release_id),
+            None,
+        )
+        if release is None or release.status != ReleasePlanStatus.ready:
+            raise ValueError("a matching ready release plan is required")
+        if ContentChannel.blog not in release.channels:
+            raise ValueError("the release plan does not include blog")
+        project.ghost_status = GhostStatus.publishing
+        self.store.save(project)
+        try:
+            project.ghost_publication = publisher.publish(
+                project.blog_output,
+                project.ghost_publication,
+                request.scheduled_for if request.action == "schedule" else None,
+            )
+            project.ghost_status = (
+                GhostStatus.scheduled
+                if request.action == "schedule"
+                else GhostStatus.published
+            )
+            project.last_error = None
+        except Exception as exc:
+            project.ghost_status = GhostStatus.failed
+            project.last_error = str(exc)
+            self.store.save(project)
+            raise
+        return self.store.save(project)
+
     def _invalidate_downstream(self, project: ContentProject, reason: str) -> None:
         self.review_service.invalidate(project, reason)
         self.release_service.invalidate(project, reason)
+
+    @staticmethod
+    def _has_channel_output(project: ContentProject) -> bool:
+        return any(
+            output is not None
+            for output in (
+                project.blog_output,
+                project.video_output,
+                project.newsletter_output,
+                project.social_output,
+            )
+        )

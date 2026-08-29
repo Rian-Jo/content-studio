@@ -28,13 +28,16 @@ project, SQLite payload, Streamlit state, or release bundle.
 
 ## Independent channel fan-out
 
-After EvidencePack approval, one request can select `blog`, `short_video`, or both.
-The two generators run independently from a deep copy of the same project snapshot:
+After EvidencePack approval, one request can select `blog`, `short_video`,
+`newsletter`, `social`, or any combination. The generators run independently from
+a deep copy of the same project snapshot:
 
 ```text
 Approved EvidencePack
   +-- BlogGenerator -> BlogOutput
   +-- VideoPlanGenerator -> MoneyPrinterVideoAdapter -> existing MPT task queue
+  +-- NewsletterGenerator -> NewsletterOutput
+  +-- SocialGenerator -> SocialOutput
 ```
 
 Each generated output lists the evidence claim IDs it used. A failed blog channel
@@ -42,9 +45,9 @@ does not cancel or delete the video task, and a failed video plan or task does n
 delete the blog draft. The SQLite project snapshot stores separate channel status,
 error, start/finish time, and LLM usage records.
 
-The current MoneyPrinterTurbo LLM adapter returns text but not provider token or
-pricing metadata. Content Studio therefore records one request and marks token/cost
-measurement as `unavailable`; it does not fabricate dollar amounts.
+Content Studio captures token counts reported by supported provider SDK responses.
+If a response omits usage, the record remains `unavailable`. Dollar cost remains
+unknown because Content Studio does not infer provider/model pricing.
 
 The video adapter supplies both narration and material search terms to MPT, so the
 MPT render does not make another script/term LLM request. It passes
@@ -56,9 +59,9 @@ The `short` profile keeps a compact 1-20 scene plan. The `long` profile requests
 structured 6-12 minute, 8-30 scene plan, allows longer narration, and asks MPT to
 process six paragraph units. Both profiles force `allow_cross_post=False`.
 
-When both drafts exist, a deterministic consistency report compares used evidence
-claim IDs and flags numbers that do not occur in any approved claim. This is a
-review aid, not a replacement for human fact checking.
+When all selected drafts exist, a deterministic consistency report compares used
+evidence claim IDs and flags numbers that do not occur in any approved claim. This
+is a review aid, not a replacement for human fact checking.
 
 ## Manual review and approval
 
@@ -81,9 +84,11 @@ the snapshot digest and refuses to proceed if the current output no longer match
 the approval. This prevents an approval for one draft from being reused after the
 draft changes.
 
-Approval itself has no external side effect. An additional, explicit Ghost action
-is required, and it still creates or updates only a `draft`. Approved videos remain
-local; no external video publisher is connected in this stage.
+Approval itself has no external side effect. Ghost draft synchronization remains a
+separate action. Publishing or scheduling that draft requires another explicit
+confirmation and a matching current release. Rendered video can likewise be sent
+to Upload-Post only through a separate confirmed action; generation always keeps
+MPT cross-posting disabled.
 
 ## Release planning and local export
 
@@ -95,6 +100,8 @@ ZIP archive. The bundle contains:
 - the approved EvidencePack, review record, and consistency report;
 - Markdown, HTML, and metadata for a selected blog output;
 - the selected short-video plan, with rendered-file paths reduced to filenames;
+- Markdown, HTML, and metadata for a selected newsletter output;
+- platform variants for a selected social output;
 - a release handoff record; and
 - a manifest containing byte sizes and SHA-256 digests for every payload file.
 
@@ -120,10 +127,22 @@ non-public destinations. Reachability, final URL, HTTP status, content type, and
 response time are stored without downloading the response body.
 
 Optional views, likes, comments, shares, and clicks are stored as `manual`
-measurements in an append-only observation history. No provider account, private
-analytics page, or publishing API is accessed. A stale release cannot receive a
+measurements in an append-only observation history. This manual receipt path does
+not access a provider account, private analytics page, or publishing API. A stale release cannot receive a
 new publication receipt, while existing receipts remain as historical evidence if
 their source release later becomes stale.
+
+## Explicit external distribution and analytics
+
+Ghost public/scheduled transitions and Upload-Post video submissions require the
+current approval snapshot, a matching `ready` release, and
+`confirm_external_action=true`. Video files must resolve under local `storage`.
+Submission uses a deterministic idempotency key, and duplicate local requests are
+rejected. Scheduled times must be future, timezone-aware values.
+
+Upload-Post status and post analytics are refreshed only when requested. Analytics
+storage accepts only numeric views, likes, comments, shares, clicks, impressions,
+reach, and saves fields; arbitrary provider payload fields are discarded.
 
 REST endpoints:
 
@@ -138,8 +157,12 @@ POST /api/v1/content/projects/{project_id}/review
 POST /api/v1/content/projects/{project_id}/release-plans
 POST /api/v1/content/projects/{project_id}/publications
 POST /api/v1/content/projects/{project_id}/publications/{receipt_id}/observations
+POST /api/v1/content/projects/{project_id}/external-video-publications
+POST /api/v1/content/projects/{project_id}/external-video-publications/{job_id}/refresh
+POST /api/v1/content/projects/{project_id}/external-video-publications/{job_id}/analytics
 POST /api/v1/content/projects/{project_id}/blog
 POST /api/v1/content/projects/{project_id}/ghost-draft
+POST /api/v1/content/projects/{project_id}/ghost-publication
 GET  /api/v1/content/projects
 GET  /api/v1/content/projects/{project_id}
 ```
@@ -166,8 +189,8 @@ GHOST_ADMIN_API_VERSION=v6.0
 ```
 
 The key is never stored in `config.toml`, content project JSON, SQLite payloads, or
-the WebUI state. The current publisher only creates or updates a `draft`; it does
-not expose a public-publish operation.
+the WebUI state. Draft synchronization is separate from the explicitly confirmed,
+approval-and-release-gated public or scheduled transition.
 
 Content state is stored in `storage/content/content.db`. Generated Markdown and HTML
 and the EvidencePack remain in the local project snapshot even after a Ghost draft

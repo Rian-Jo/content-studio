@@ -17,6 +17,8 @@ def utc_now() -> datetime:
 class ContentChannel(str, Enum):
     blog = "blog"
     short_video = "short_video"
+    newsletter = "newsletter"
+    social = "social"
 
 
 class BlogStatus(str, Enum):
@@ -31,6 +33,8 @@ class GhostStatus(str, Enum):
     ready = "ready"
     publishing = "publishing"
     draft_created = "draft_created"
+    scheduled = "scheduled"
+    published = "published"
     failed = "failed"
 
 
@@ -85,6 +89,14 @@ class PublicationReachability(str, Enum):
     unreachable = "unreachable"
 
 
+class ExternalJobStatus(str, Enum):
+    submitted = "submitted"
+    scheduled = "scheduled"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+
+
 class BlogOutput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     slug: str = Field(min_length=1, max_length=191, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -116,8 +128,31 @@ class VideoOutput(BaseModel):
     rendered_files: list[str] = Field(default_factory=list)
 
 
+class NewsletterOutput(BaseModel):
+    subject: str = Field(min_length=1, max_length=255)
+    preview_text: str = Field(min_length=1, max_length=300)
+    markdown: str = Field(min_length=100, max_length=30000)
+    html: str = Field(min_length=100, max_length=50000)
+    call_to_action: str = Field(min_length=1, max_length=500)
+    evidence_claim_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+class SocialPost(BaseModel):
+    platform: Literal["linkedin", "x", "instagram", "threads"]
+    content: str = Field(min_length=1, max_length=5000)
+    hashtags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SocialOutput(BaseModel):
+    campaign_summary: str = Field(min_length=1, max_length=1000)
+    posts: list[SocialPost] = Field(min_length=1, max_length=12)
+    evidence_claim_ids: list[str] = Field(min_length=1, max_length=50)
+
+
 class LLMUsageRecord(BaseModel):
     request_count: int = Field(default=0, ge=0)
+    provider: str | None = Field(default=None, max_length=100)
+    model: str | None = Field(default=None, max_length=300)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     estimated_cost_usd: float | None = Field(default=None, ge=0)
@@ -140,6 +175,7 @@ class ConsistencyReport(BaseModel):
     shared_claim_ids: list[str] = Field(default_factory=list, max_length=50)
     blog_only_claim_ids: list[str] = Field(default_factory=list, max_length=50)
     video_only_claim_ids: list[str] = Field(default_factory=list, max_length=50)
+    channel_claim_ids: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class VideoGenerationOptions(BaseModel):
@@ -153,7 +189,7 @@ class VideoGenerationOptions(BaseModel):
 
 
 class ContentFanoutRequest(BaseModel):
-    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    channels: list[ContentChannel] = Field(min_length=1, max_length=4)
     video_options: VideoGenerationOptions = Field(
         default_factory=VideoGenerationOptions
     )
@@ -190,7 +226,7 @@ class ReviewRecord(BaseModel):
     status: ApprovalStatus
     reviewed_at: datetime
     note: str | None = Field(default=None, max_length=2000)
-    reviewed_channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    reviewed_channels: list[ContentChannel] = Field(min_length=1, max_length=4)
     snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     quality_warnings_acknowledged: bool = False
     invalidated_at: datetime | None = None
@@ -198,7 +234,7 @@ class ReviewRecord(BaseModel):
 
 
 class ContentReleaseRequest(BaseModel):
-    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    channels: list[ContentChannel] = Field(min_length=1, max_length=4)
     planned_for: datetime | None = None
     note: str | None = Field(default=None, max_length=2000)
 
@@ -221,7 +257,7 @@ class ReleaseArtifact(BaseModel):
 class ReleasePlan(BaseModel):
     release_id: str
     status: ReleasePlanStatus = ReleasePlanStatus.ready
-    channels: list[ContentChannel] = Field(min_length=1, max_length=2)
+    channels: list[ContentChannel] = Field(min_length=1, max_length=4)
     created_at: datetime
     planned_for: datetime | None = None
     note: str | None = Field(default=None, max_length=2000)
@@ -292,11 +328,76 @@ class PublicationReceipt(BaseModel):
     )
 
 
+class ExternalVideoPublishRequest(BaseModel):
+    release_id: str = Field(min_length=1, max_length=100)
+    platforms: list[Literal["youtube", "tiktok", "instagram"]] = Field(
+        min_length=1, max_length=3
+    )
+    scheduled_for: datetime | None = None
+    rendered_file_index: int = Field(default=0, ge=0)
+    confirm_external_action: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_external_publish(self) -> ExternalVideoPublishRequest:
+        if len(self.platforms) != len(set(self.platforms)):
+            raise ValueError("external publishing platforms must be unique")
+        if self.scheduled_for is not None:
+            if self.scheduled_for.tzinfo is None:
+                raise ValueError("scheduled_for must include a timezone offset")
+            if self.scheduled_for <= utc_now():
+                raise ValueError("scheduled_for must be in the future")
+        return self
+
+
+class ProviderAnalyticsSnapshot(BaseModel):
+    captured_at: datetime
+    provider: Literal["upload_post"] = "upload_post"
+    metrics: dict[str, int | float] = Field(default_factory=dict)
+
+
+class ExternalPublicationJob(BaseModel):
+    job_id: str = Field(default_factory=lambda: str(uuid4()))
+    release_id: str
+    channel: Literal[ContentChannel.short_video] = ContentChannel.short_video
+    provider: Literal["upload_post"] = "upload_post"
+    platforms: list[Literal["youtube", "tiktok", "instagram"]]
+    status: ExternalJobStatus
+    provider_request_id: str | None = Field(default=None, max_length=255)
+    provider_job_id: str | None = Field(default=None, max_length=255)
+    scheduled_for: datetime | None = None
+    submitted_at: datetime
+    updated_at: datetime
+    idempotency_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    analytics: list[ProviderAnalyticsSnapshot] = Field(
+        default_factory=list, max_length=100
+    )
+    error: str | None = Field(default=None, max_length=500)
+
+
 class GhostPublication(BaseModel):
     post_id: str
     updated_at: str
-    status: Literal["draft"] = "draft"
+    status: Literal["draft", "scheduled", "published"] = "draft"
     url: str | None = None
+    published_at: datetime | None = None
+
+
+class GhostPublicationRequest(BaseModel):
+    release_id: str = Field(min_length=1, max_length=100)
+    action: Literal["publish", "schedule"]
+    scheduled_for: datetime | None = None
+    confirm_external_action: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_ghost_publication(self) -> GhostPublicationRequest:
+        if self.action == "schedule":
+            if self.scheduled_for is None or self.scheduled_for.tzinfo is None:
+                raise ValueError("scheduled_for with a timezone is required")
+            if self.scheduled_for <= utc_now():
+                raise ValueError("scheduled_for must be in the future")
+        elif self.scheduled_for is not None:
+            raise ValueError("scheduled_for is only valid for schedule actions")
+        return self
 
 
 class ContentProjectCreate(BaseModel):
@@ -318,6 +419,10 @@ class ContentProject(ContentProjectCreate):
     blog_status: BlogStatus = BlogStatus.not_started
     video_output: VideoOutput | None = None
     video_status: VideoStatus = VideoStatus.not_started
+    newsletter_output: NewsletterOutput | None = None
+    newsletter_status: BlogStatus = BlogStatus.not_started
+    social_output: SocialOutput | None = None
+    social_status: BlogStatus = BlogStatus.not_started
     channel_runs: dict[str, ChannelRunRecord] = Field(default_factory=dict)
     consistency_report: ConsistencyReport = Field(default_factory=ConsistencyReport)
     ghost_status: GhostStatus = GhostStatus.not_configured
@@ -326,6 +431,9 @@ class ContentProject(ContentProjectCreate):
     review_record: ReviewRecord | None = None
     release_plans: list[ReleasePlan] = Field(default_factory=list, max_length=50)
     publication_receipts: list[PublicationReceipt] = Field(
+        default_factory=list, max_length=100
+    )
+    external_publication_jobs: list[ExternalPublicationJob] = Field(
         default_factory=list, max_length=100
     )
     last_error: str | None = None

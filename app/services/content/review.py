@@ -41,6 +41,17 @@ class ContentReviewService:
                 if ContentChannel.short_video in channels and project.video_output
                 else None
             ),
+            "newsletter_output": (
+                project.newsletter_output.model_dump(mode="json")
+                if ContentChannel.newsletter in channels
+                and project.newsletter_output
+                else None
+            ),
+            "social_output": (
+                project.social_output.model_dump(mode="json")
+                if ContentChannel.social in channels and project.social_output
+                else None
+            ),
             "consistency_report": project.consistency_report.model_dump(mode="json"),
         }
         serialized = json.dumps(
@@ -81,6 +92,10 @@ class ContentReviewService:
             raise ValueError("the selected blog output does not exist")
         if ContentChannel.short_video in channels and project.video_output is None:
             raise ValueError("the selected video output does not exist")
+        if ContentChannel.newsletter in channels and project.newsletter_output is None:
+            raise ValueError("the selected newsletter output does not exist")
+        if ContentChannel.social in channels and project.social_output is None:
+            raise ValueError("the selected social output does not exist")
 
     @staticmethod
     def _validate_approval_ready(
@@ -98,6 +113,16 @@ class ContentReviewService:
             and project.video_status != VideoStatus.complete
         ):
             raise ValueError("the video channel is not ready for approval")
+        if (
+            ContentChannel.newsletter in channels
+            and project.newsletter_status != BlogStatus.draft_complete
+        ):
+            raise ValueError("the newsletter channel is not ready for approval")
+        if (
+            ContentChannel.social in channels
+            and project.social_status != BlogStatus.draft_complete
+        ):
+            raise ValueError("the social channel is not ready for approval")
         if len(channels) > 1:
             if project.consistency_report.status == ConsistencyStatus.not_ready:
                 raise ValueError("run the cross-channel consistency check first")

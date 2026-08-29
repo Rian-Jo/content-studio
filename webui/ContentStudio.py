@@ -21,6 +21,8 @@ from app.models.content import (  # noqa: E402
     ContentProjectCreate,
     ContentReleaseRequest,
     ContentReviewRequest,
+    ExternalVideoPublishRequest,
+    GhostPublicationRequest,
     PublicationObservationRequest,
     PublicationReceiptRequest,
     ReviewDecision,
@@ -94,10 +96,18 @@ with left:
     st.write(f"근거: `{project.evidence_status.value}`")
     st.write(f"블로그: `{project.blog_status.value}`")
     st.write(f"영상: `{project.video_status.value}`")
+    st.write(f"뉴스레터: `{project.newsletter_status.value}`")
+    st.write(f"소셜: `{project.social_status.value}`")
     st.write(f"Ghost: `{project.ghost_status.value}`")
     st.write(f"검토: `{project.approval_status.value}`")
-    has_channel_output = (
-        project.blog_output is not None or project.video_output is not None
+    has_channel_output = any(
+        output is not None
+        for output in (
+            project.blog_output,
+            project.video_output,
+            project.newsletter_output,
+            project.social_output,
+        )
     )
     with st.form("research-sources"):
         source_urls = st.text_area(
@@ -122,7 +132,7 @@ with left:
         discover = st.form_submit_button(
             "자동 출처 탐색 및 EvidencePack 생성",
             use_container_width=True,
-            disabled=project.blog_output is not None or project.video_output is not None,
+            disabled=has_channel_output,
         )
 
     if discover:
@@ -184,11 +194,13 @@ with left:
     with st.form("channel-fanout"):
         selected_channels = st.multiselect(
             "생성 채널",
-            options=["blog", "short_video"],
+            options=["blog", "short_video", "newsletter", "social"],
             default=["blog"],
             format_func=lambda value: {
                 "blog": "블로그",
                 "short_video": "숏폼 영상",
+                "newsletter": "뉴스레터",
+                "social": "소셜 포스트 묶음",
             }[value],
             disabled=project.evidence_status != EvidenceStatus.approved,
         )
@@ -321,6 +333,8 @@ with right:
         review_tab,
         release_tab,
         publication_tab,
+        newsletter_tab,
+        social_tab,
     ) = st.tabs(
         [
             "Research & Evidence",
@@ -330,6 +344,8 @@ with right:
             "Review & Approve",
             "Release Plan & Export",
             "Publication Tracking",
+            "뉴스레터",
+            "소셜",
         ]
     )
     with evidence_tab:
@@ -439,6 +455,16 @@ with right:
                 if ContentChannel.short_video not in requested
                 else project.video_status.value
             ),
+            "newsletter": (
+                "not_selected"
+                if ContentChannel.newsletter not in requested
+                else project.newsletter_status.value
+            ),
+            "social": (
+                "not_selected"
+                if ContentChannel.social not in requested
+                else project.social_status.value
+            ),
             "quality": project.consistency_report.status.value,
         }
         st.json(readiness)
@@ -451,9 +477,19 @@ with right:
             ContentChannel.short_video not in requested
             or project.video_status == VideoStatus.complete
         )
+        newsletter_review_ready = (
+            ContentChannel.newsletter not in requested
+            or project.newsletter_status.value == "draft_complete"
+        )
+        social_review_ready = (
+            ContentChannel.social not in requested
+            or project.social_status.value == "draft_complete"
+        )
         has_reviewable_output = bool(
             (ContentChannel.blog in requested and project.blog_output)
             or (ContentChannel.short_video in requested and project.video_output)
+            or (ContentChannel.newsletter in requested and project.newsletter_output)
+            or (ContentChannel.social in requested and project.social_output)
         )
         quality_warning = project.consistency_report.status.value == "warning"
 
@@ -475,6 +511,8 @@ with right:
                     not has_reviewable_output
                     or not blog_review_ready
                     or not video_review_ready
+                    or not newsletter_review_ready
+                    or not social_review_ready
                     or (quality_warning and not acknowledge_warnings)
                 ),
             )
@@ -729,3 +767,205 @@ with right:
                 ):
                     st.caption(receipt.public_url)
                     st.json(receipt.model_dump(mode="json"))
+
+        st.divider()
+        st.subheader("승인된 외부 실행")
+        st.warning(
+            "아래 작업은 실제 외부 계정에 게시하거나 예약합니다. 현재 승인과 ready "
+            "릴리스를 다시 확인하고 실행 직전에 명시적으로 동의해야 합니다."
+        )
+        current_release_plans = [
+            plan
+            for plan in ready_plans
+            if plan.approval_snapshot_sha256
+            == (project.review_record.snapshot_sha256 if current_approval else "")
+        ]
+        blog_release_ids = [
+            plan.release_id
+            for plan in current_release_plans
+            if ContentChannel.blog in plan.channels
+        ]
+        ghost_publish_ready = bool(
+            ghost_ready
+            and current_approval
+            and project.ghost_publication
+            and project.ghost_publication.status == "draft"
+            and blog_release_ids
+        )
+        with st.form("ghost-publication"):
+            ghost_release_id = st.selectbox(
+                "Ghost 릴리스",
+                options=blog_release_ids or ["ready blog release required"],
+                disabled=not ghost_publish_ready,
+            )
+            ghost_action = st.selectbox(
+                "Ghost 실행",
+                options=["publish", "schedule"],
+                disabled=not ghost_publish_ready,
+            )
+            ghost_scheduled_for = st.text_input(
+                "Ghost 예약 시각 (ISO 8601)",
+                placeholder="2026-09-01T09:00:00+09:00",
+                disabled=not ghost_publish_ready or ghost_action != "schedule",
+            )
+            confirm_ghost_publication = st.checkbox(
+                "승인된 Ghost 초안을 실제 공개/예약하는 데 동의합니다.",
+                disabled=not ghost_publish_ready,
+            )
+            execute_ghost_publication = st.form_submit_button(
+                "Ghost 외부 실행",
+                disabled=not ghost_publish_ready or not confirm_ghost_publication,
+            )
+        if execute_ghost_publication:
+            try:
+                scheduled_for = (
+                    datetime.fromisoformat(ghost_scheduled_for.replace("Z", "+00:00"))
+                    if ghost_action == "schedule"
+                    else None
+                )
+                publisher = GhostPublisher(
+                    GhostPublisherConfig(
+                        admin_url=os.environ["GHOST_ADMIN_URL"],
+                        admin_api_key=os.environ["GHOST_ADMIN_API_KEY"],
+                        api_version=os.getenv("GHOST_ADMIN_API_VERSION", "v6.0"),
+                    )
+                )
+                workflow().publish_ghost(
+                    project.project_id,
+                    GhostPublicationRequest(
+                        release_id=ghost_release_id,
+                        action=ghost_action,
+                        scheduled_for=scheduled_for,
+                        confirm_external_action=True,
+                    ),
+                    publisher,
+                )
+            except Exception as exc:
+                st.error(f"Ghost 외부 실행 실패: {exc}")
+            else:
+                st.success("Ghost 공개/예약 요청을 전송했습니다.")
+                st.rerun()
+
+        video_release_ids = [
+            plan.release_id
+            for plan in current_release_plans
+            if ContentChannel.short_video in plan.channels
+        ]
+        upload_post_ready = bool(
+            os.getenv("UPLOAD_POST_API_KEY") and os.getenv("UPLOAD_POST_USERNAME")
+        )
+        video_publish_ready = bool(
+            upload_post_ready
+            and current_approval
+            and project.video_output
+            and project.video_output.rendered_files
+            and video_release_ids
+        )
+        with st.form("external-video-publication"):
+            video_release_id = st.selectbox(
+                "영상 릴리스",
+                options=video_release_ids or ["ready video release required"],
+                disabled=not video_publish_ready,
+            )
+            external_platforms = st.multiselect(
+                "외부 영상 플랫폼",
+                options=["youtube", "tiktok", "instagram"],
+                disabled=not video_publish_ready,
+            )
+            video_scheduled_for = st.text_input(
+                "영상 예약 시각 (선택, ISO 8601)",
+                placeholder="2026-09-01T09:00:00+09:00",
+                disabled=not video_publish_ready,
+            )
+            confirm_video_publication = st.checkbox(
+                "승인된 렌더 영상을 선택한 외부 플랫폼에 게시/예약하는 데 동의합니다.",
+                disabled=not video_publish_ready,
+            )
+            execute_video_publication = st.form_submit_button(
+                "외부 영상 실행",
+                disabled=(
+                    not video_publish_ready
+                    or not external_platforms
+                    or not confirm_video_publication
+                ),
+            )
+        if execute_video_publication:
+            try:
+                scheduled_for = (
+                    datetime.fromisoformat(video_scheduled_for.replace("Z", "+00:00"))
+                    if video_scheduled_for.strip()
+                    else None
+                )
+                workflow().publish_external_video(
+                    project.project_id,
+                    ExternalVideoPublishRequest(
+                        release_id=video_release_id,
+                        platforms=external_platforms,
+                        scheduled_for=scheduled_for,
+                        confirm_external_action=True,
+                    ),
+                )
+            except Exception as exc:
+                st.error(f"외부 영상 실행 실패: {exc}")
+            else:
+                st.success("외부 영상 게시/예약 요청을 전송했습니다.")
+                st.rerun()
+
+        if project.external_publication_jobs:
+            st.subheader("외부 영상 작업 및 공급자 분석")
+            for job in reversed(project.external_publication_jobs):
+                with st.expander(f"{job.job_id} · {job.status.value}"):
+                    st.json(job.model_dump(mode="json"))
+                    refresh_job, refresh_metrics = st.columns(2)
+                    if refresh_job.button("게시 상태 갱신", key=f"refresh-{job.job_id}"):
+                        try:
+                            workflow().refresh_external_publication(
+                                project.project_id, job.job_id
+                            )
+                        except Exception as exc:
+                            st.error(f"외부 게시 상태 갱신 실패: {exc}")
+                        else:
+                            st.rerun()
+                    if refresh_metrics.button(
+                        "공급자 분석 갱신",
+                        key=f"analytics-{job.job_id}",
+                        disabled=not job.provider_request_id,
+                    ):
+                        try:
+                            workflow().refresh_external_analytics(
+                                project.project_id, job.job_id
+                            )
+                        except Exception as exc:
+                            st.error(f"공급자 분석 갱신 실패: {exc}")
+                        else:
+                            st.rerun()
+
+    with newsletter_tab:
+        if project.newsletter_output:
+            st.subheader(project.newsletter_output.subject)
+            st.caption(project.newsletter_output.preview_text)
+            st.markdown(project.newsletter_output.markdown)
+            with st.expander("전송 메타데이터"):
+                st.json(
+                    {
+                        "call_to_action": project.newsletter_output.call_to_action,
+                        "evidence_claim_ids": (
+                            project.newsletter_output.evidence_claim_ids
+                        ),
+                    }
+                )
+        else:
+            st.info("뉴스레터 채널을 선택하면 근거 기반 초안이 표시됩니다.")
+
+    with social_tab:
+        if project.social_output:
+            st.write(project.social_output.campaign_summary)
+            for post in project.social_output.posts:
+                with st.expander(post.platform, expanded=True):
+                    st.write(post.content)
+                    if post.hashtags:
+                        st.caption(" ".join(f"#{tag.lstrip('#')}" for tag in post.hashtags))
+            with st.expander("근거 주장 ID"):
+                st.json(project.social_output.evidence_claim_ids)
+        else:
+            st.info("소셜 채널을 선택하면 플랫폼별 포스트 초안이 표시됩니다.")

@@ -11,6 +11,8 @@ from app.models.content import (
     ContentProjectResponse,
     ContentReleaseRequest,
     ContentReviewRequest,
+    ExternalVideoPublishRequest,
+    GhostPublicationRequest,
     PublicationObservationRequest,
     PublicationReceiptRequest,
 )
@@ -256,6 +258,59 @@ def observe_content_publication(
 
 
 @router.post(
+    "/content/projects/{project_id}/external-video-publications",
+    response_model=ContentProjectResponse,
+    summary="Explicitly publish or schedule an approved rendered video",
+)
+def publish_external_video(
+    request: Request, project_id: str, body: ExternalVideoPublishRequest
+):
+    try:
+        project = get_workflow().publish_external_video(project_id, body)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/external-video-publications/{job_id}/refresh",
+    response_model=ContentProjectResponse,
+    summary="Refresh an external video publication job",
+)
+def refresh_external_video_publication(request: Request, project_id: str, job_id: str):
+    try:
+        project = get_workflow().refresh_external_publication(project_id, job_id)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/external-video-publications/{job_id}/analytics",
+    response_model=ContentProjectResponse,
+    summary="Fetch provider-reported analytics for an external video publication",
+)
+def refresh_external_video_analytics(request: Request, project_id: str, job_id: str):
+    try:
+        project = get_workflow().refresh_external_analytics(project_id, job_id)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
     "/content/projects/{project_id}/blog",
     response_model=ContentProjectResponse,
     summary="Generate a blog draft for a content project",
@@ -298,6 +353,43 @@ def sync_ghost_draft(request: Request, project_id: str):
             )
         )
         project = get_workflow().sync_ghost_draft(project_id, publisher)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/ghost-publication",
+    response_model=ContentProjectResponse,
+    summary="Explicitly publish or schedule an approved Ghost draft",
+)
+def publish_ghost_content(
+    request: Request, project_id: str, body: GhostPublicationRequest
+):
+    admin_url = os.getenv("GHOST_ADMIN_URL", "").strip()
+    admin_api_key = os.getenv("GHOST_ADMIN_API_KEY", "").strip()
+    if not admin_url or not admin_api_key:
+        raise HttpException(
+            task_id=base.get_task_id(request),
+            status_code=503,
+            message=(
+                "Ghost publishing is not configured; set GHOST_ADMIN_URL and "
+                "GHOST_ADMIN_API_KEY on the server"
+            ),
+        )
+    try:
+        publisher = GhostPublisher(
+            GhostPublisherConfig(
+                admin_url=admin_url,
+                admin_api_key=admin_api_key,
+                api_version=os.getenv("GHOST_ADMIN_API_VERSION", "v6.0"),
+            )
+        )
+        project = get_workflow().publish_ghost(project_id, body, publisher)
     except ContentProjectNotFoundError as exc:
         raise _not_found(request, project_id) from exc
     except ValueError as exc:

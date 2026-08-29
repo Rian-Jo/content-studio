@@ -14,20 +14,21 @@ own output and status even when another channel has not started or has failed.
 
 ## Implemented in the current MVP
 
-- `ContentProject` and `BlogOutput` domain models
+- `ContentProject`, `BlogOutput`, `NewsletterOutput`, and `SocialOutput` domain models
 - Verified collection of user-supplied public HTTP/HTTPS source URLs and optional
   automatic discovery through the server-side Brave Search API
 - `EvidencePack` records with claim-to-source links and a manual approval gate
 - Local SQLite project-state storage
 - An independent `BlogWorkflow` that generates only from approved evidence and
   does not require video generation
-- Independent blog/short-video fan-out from the same approved `EvidencePack`
+- Independent blog, short/long-video, newsletter, and social fan-out from the same
+  approved `EvidencePack`
 - A `MoneyPrinterVideoAdapter` that submits evidence-derived narration and search
   terms to the existing MoneyPrinterTurbo task queue
 - Short and 6-12 minute long-video planning profiles using the same isolated MPT
   renderer with cross-posting disabled
 - Per-channel status and LLM request records, plus deterministic claim/number
-  consistency checks across blog and video drafts
+  consistency checks across every selected channel draft
 - A unified manual review record bound to the exact evidence/output snapshot with
   SHA-256, quality-warning acknowledgement, and change-request notes
 - Automatic approval invalidation when a reviewed output is regenerated or changes
@@ -36,6 +37,9 @@ own output and status even when another channel has not started or has failed.
 - Release-linked publication receipts with SSRF-safe public URL checks and manual
   performance-observation history
 - A server-side Ghost Admin API integration limited to creating or updating drafts
+- Explicit, approval-and-release-gated Ghost public/scheduled transitions
+- Explicit Upload-Post video publishing/scheduling with idempotency protection,
+  status refresh, and allowlisted provider-reported analytics
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
 
@@ -43,9 +47,8 @@ Automatic source discovery uses Brave Search when `BRAVE_SEARCH_API_KEY` is set;
 manual source URLs remain available without it. Exact token and cost amounts remain
 unavailable when the configured LLM adapter does not report usage;
 Content Studio records this explicitly instead of inventing an estimate. Other
-roadmap items not implemented yet are newsletter and social workflows, public or
-scheduled publishing, external video publishing, and provider-connected automatic
-analytics.
+Provider token counts are recorded when the configured SDK reports them; dollar
+cost is left unknown because provider/model pricing is not inferred.
 
 ## Run Content Studio locally
 
@@ -72,11 +75,13 @@ Create project
   -> submit public source URLs or discover them with Brave Search
   -> verify sources and build claim-to-source links
   -> review and approve the EvidencePack
-  -> independently generate a blog draft and/or MPT short/long video
+  -> independently generate blog, MPT short/long video, newsletter, and/or social drafts
   -> review channel status and the consistency report
   -> approve the exact output snapshot or request changes
   -> create a local release plan and checksummed ZIP handoff package
   -> optionally synchronize an approved blog to a Ghost draft
+  -> with a second explicit confirmation, publish/schedule Ghost or rendered video
+  -> refresh external job status and allowlisted provider-reported video analytics
   -> after manual publication elsewhere, record its public URL and observations
 ```
 
@@ -86,9 +91,9 @@ Content Studio video jobs always disable MoneyPrinterTurbo cross-posting, even i
 automatic upload is configured elsewhere. Rendering can still use the configured
 LLM, TTS, and material-provider APIs and may incur their normal costs.
 
-Approval does not publish content. It unlocks only explicitly supported downstream
-actions. At present, that means creating or updating a Ghost **draft**. Public Ghost
-publishing, scheduling, and external video publishing remain unavailable.
+Approval alone does not publish content. Draft synchronization, Ghost publication,
+and external video publication are separate actions. Public/scheduled actions also
+require a matching current `ready` release and `confirm_external_action=true`.
 
 An approved snapshot can also be exported locally under
 `storage/content/releases/`. The package contains a manifest, evidence and review
@@ -114,10 +119,15 @@ $env:GHOST_ADMIN_API_KEY="<integration-id>:<hex-secret>"
 $env:GHOST_ADMIN_API_VERSION="v6.0"
 ```
 
-The current integration supports **draft create/update only**. It does not expose
-automatic public publishing. The Admin API key is not stored in project records,
-SQLite payloads, the WebUI state, or the repository. See
+Draft create/update is the default. Explicit public or scheduled transitions are
+available only after current approval, a matching ready release, and a second
+confirmation. The Admin API key is not stored in project records, SQLite payloads,
+the WebUI state, or the repository. See
 [Content Studio MVP documentation](docs/content-studio.md) for details.
+
+Optional external video distribution reads `UPLOAD_POST_API_KEY` and
+`UPLOAD_POST_USERNAME` only from server environment variables. No external call is
+made during generation, review, or release export.
 
 ## Verification
 

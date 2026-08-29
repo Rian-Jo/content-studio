@@ -16,6 +16,8 @@ from app.services.content import (
     ContentReleaseService,
     ContentStore,
     ContentWorkflow,
+    NewsletterGenerator,
+    SocialGenerator,
 )
 
 from test.services.test_content_studio import (
@@ -25,6 +27,8 @@ from test.services.test_content_studio import (
     FakeSearchProvider,
     FakeVideoGenerator,
     sample_blog_payload,
+    sample_newsletter_payload,
+    sample_social_payload,
 )
 
 
@@ -43,6 +47,12 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
+            newsletter_generator=NewsletterGenerator(
+                responder=lambda _: json.dumps(sample_newsletter_payload())
+            ),
+            social_generator=SocialGenerator(
+                responder=lambda _: json.dumps(sample_social_payload())
+            ),
             researcher=FakeResearcher(),
             evidence_builder=FakeEvidenceBuilder(),
             video_generator=FakeVideoGenerator(),

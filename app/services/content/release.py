@@ -157,6 +157,22 @@ class ContentReleaseService:
             video_payload["media_files_copied"] = False
             write_json("short-video/plan.json", video_payload)
 
+        if (
+            ContentChannel.newsletter in request.channels
+            and project.newsletter_output is not None
+        ):
+            newsletter = project.newsletter_output
+            self._write_text(root / "newsletter" / "newsletter.md", newsletter.markdown)
+            specs.append(("newsletter/newsletter.md", "text/markdown"))
+            self._write_text(root / "newsletter" / "newsletter.html", newsletter.html)
+            specs.append(("newsletter/newsletter.html", "text/html"))
+            write_json("newsletter/metadata.json", newsletter.model_dump(mode="json"))
+
+        if ContentChannel.social in request.channels and project.social_output is not None:
+            write_json(
+                "social/posts.json", project.social_output.model_dump(mode="json")
+            )
+
         write_json(
             "release.json",
             {

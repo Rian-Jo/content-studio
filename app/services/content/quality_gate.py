@@ -23,47 +23,74 @@ class ContentConsistencyChecker:
     """Run deterministic claim-reference and numeric consistency checks."""
 
     def check(self, project: ContentProject) -> ConsistencyReport:
-        if (
-            project.evidence_pack is None
-            or project.blog_output is None
-            or project.video_output is None
-        ):
+        if project.evidence_pack is None:
+            return ConsistencyReport(status=ConsistencyStatus.not_ready)
+        channel_data = {}
+        if project.blog_output is not None:
+            channel_data["blog"] = (
+                project.blog_output.evidence_claim_ids,
+                "\n".join(
+                    [
+                        project.blog_output.title,
+                        project.blog_output.markdown,
+                        project.blog_output.meta_description,
+                    ]
+                ),
+            )
+        if project.video_output is not None:
+            channel_data["short_video"] = (
+                project.video_output.evidence_claim_ids,
+                "\n".join(
+                    [
+                        project.video_output.title,
+                        project.video_output.narration,
+                        project.video_output.caption,
+                    ]
+                ),
+            )
+        if project.newsletter_output is not None:
+            channel_data["newsletter"] = (
+                project.newsletter_output.evidence_claim_ids,
+                "\n".join(
+                    [
+                        project.newsletter_output.subject,
+                        project.newsletter_output.markdown,
+                        project.newsletter_output.preview_text,
+                    ]
+                ),
+            )
+        if project.social_output is not None:
+            channel_data["social"] = (
+                project.social_output.evidence_claim_ids,
+                "\n".join(
+                    post.content for post in project.social_output.posts
+                ),
+            )
+        selected = [channel.value for channel in project.requested_channels]
+        if not selected or any(channel not in channel_data for channel in selected):
             return ConsistencyReport(status=ConsistencyStatus.not_ready)
 
-        blog_claim_ids = set(project.blog_output.evidence_claim_ids)
-        video_claim_ids = set(project.video_output.evidence_claim_ids)
         evidence_text = "\n".join(
             claim.statement for claim in project.evidence_pack.claims
         )
-        blog_text = "\n".join(
-            [
-                project.blog_output.title,
-                project.blog_output.markdown,
-                project.blog_output.meta_description,
-            ]
-        )
-        video_text = "\n".join(
-            [
-                project.video_output.title,
-                project.video_output.narration,
-                project.video_output.caption,
-            ]
-        )
         evidence_numbers = _numbers(evidence_text)
-        unsupported_blog = sorted(_numbers(blog_text) - evidence_numbers)
-        unsupported_video = sorted(_numbers(video_text) - evidence_numbers)
-
         issues = []
-        if unsupported_blog:
-            issues.append(
-                "blog contains numbers absent from approved claims: "
-                + ", ".join(unsupported_blog)
-            )
-        if unsupported_video:
-            issues.append(
-                "video contains numbers absent from approved claims: "
-                + ", ".join(unsupported_video)
-            )
+        channel_claim_ids = {}
+        claim_sets = []
+        for channel in selected:
+            claim_ids, text = channel_data[channel]
+            channel_claim_ids[channel] = sorted(set(claim_ids))
+            claim_sets.append(set(claim_ids))
+            unsupported = sorted(_numbers(text) - evidence_numbers)
+            if unsupported:
+                issues.append(
+                    f"{channel} contains numbers absent from approved claims: "
+                    + ", ".join(unsupported)
+                )
+
+        shared = set.intersection(*claim_sets) if claim_sets else set()
+        blog_claim_ids = set(channel_claim_ids.get("blog", []))
+        video_claim_ids = set(channel_claim_ids.get("short_video", []))
 
         return ConsistencyReport(
             status=(
@@ -71,7 +98,8 @@ class ContentConsistencyChecker:
             ),
             checked_at=datetime.now(timezone.utc),
             issues=issues,
-            shared_claim_ids=sorted(blog_claim_ids & video_claim_ids),
+            shared_claim_ids=sorted(shared),
             blog_only_claim_ids=sorted(blog_claim_ids - video_claim_ids),
             video_only_claim_ids=sorted(video_claim_ids - blog_claim_ids),
+            channel_claim_ids=channel_claim_ids,
         )
