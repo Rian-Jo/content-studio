@@ -18,7 +18,12 @@ from app.models.content import (
     VideoStatus,
     utc_now,
 )
-from app.models.evidence import EvidenceStatus, ResearchRequest
+from app.models.evidence import (
+    EvidenceStatus,
+    ResearchRequest,
+    SourceDiscoveryRequest,
+    SourceInput,
+)
 from app.services.content.blog_generator import BlogGenerator
 from app.services.content.evidence_builder import EvidenceBuilder
 from app.services.content.quality_gate import ContentConsistencyChecker
@@ -26,6 +31,7 @@ from app.services.content.research import SourceResearcher
 from app.services.content.publication import ContentPublicationService
 from app.services.content.release import ContentReleaseService
 from app.services.content.review import ContentReviewService
+from app.services.content.search import BraveSearchProvider, SearchProvider
 from app.services.content.store import ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter, VideoGenerator
 from app.services.publishers.base import DraftPublisher
@@ -43,6 +49,7 @@ class ContentWorkflow:
         review_service: ContentReviewService | None = None,
         release_service: ContentReleaseService | None = None,
         publication_service: ContentPublicationService | None = None,
+        search_provider: SearchProvider | None = None,
     ):
         self.store = store or ContentStore()
         self.blog_generator = blog_generator or BlogGenerator()
@@ -57,12 +64,16 @@ class ContentWorkflow:
         self.publication_service = publication_service or ContentPublicationService(
             review_service=self.review_service
         )
+        self.search_provider = search_provider or BraveSearchProvider()
 
     def create_project(self, request: ContentProjectCreate) -> ContentProject:
         return self.store.save(ContentProject(**request.model_dump()))
 
     def research_evidence(
-        self, project_id: str, request: ResearchRequest
+        self,
+        project_id: str,
+        request: ResearchRequest,
+        preserve_discovery: bool = False,
     ) -> ContentProject:
         project = self.store.get(project_id)
         if project.blog_output is not None or project.video_output is not None:
@@ -71,6 +82,8 @@ class ContentWorkflow:
                 "create a new content project instead"
             )
         project.evidence_status = EvidenceStatus.researching
+        if not preserve_discovery:
+            project.source_discovery = None
         project.last_error = None
         self.store.save(project)
         try:
@@ -84,6 +97,37 @@ class ContentWorkflow:
             self.store.save(project)
             raise
         return self.store.save(project)
+
+    def discover_evidence(
+        self, project_id: str, request: SourceDiscoveryRequest
+    ) -> ContentProject:
+        project = self.store.get(project_id)
+        if project.blog_output is not None or project.video_output is not None:
+            raise ValueError(
+                "sources cannot be discovered after a channel output exists; "
+                "create a new content project instead"
+            )
+        project.evidence_status = EvidenceStatus.researching
+        project.last_error = None
+        self.store.save(project)
+        try:
+            discovery = self.search_provider.search(request, project.topic)
+        except Exception as exc:
+            project.evidence_status = EvidenceStatus.failed
+            project.last_error = str(exc)
+            self.store.save(project)
+            raise
+        project.source_discovery = discovery
+        self.store.save(project)
+        sources = [
+            SourceInput(url=candidate.url, title=candidate.title)
+            for candidate in discovery.candidates
+        ]
+        return self.research_evidence(
+            project_id,
+            ResearchRequest(sources=sources),
+            preserve_discovery=True,
+        )
 
     def approve_evidence(
         self, project_id: str, note: str | None = None

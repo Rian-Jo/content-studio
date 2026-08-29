@@ -30,6 +30,7 @@ from app.models.content import (  # noqa: E402
 from app.models.evidence import (  # noqa: E402
     EvidenceStatus,
     ResearchRequest,
+    SourceDiscoveryRequest,
     SourceInput,
 )
 from app.services.content import ContentWorkflow  # noqa: E402
@@ -110,6 +111,38 @@ with left:
             use_container_width=True,
             disabled=has_channel_output,
         )
+
+    with st.form("discover-sources"):
+        st.caption("또는 서버의 Brave Search API로 공개 출처 후보를 자동 탐색합니다.")
+        discovery_query = st.text_input(
+            "검색어 (선택)",
+            placeholder="비워 두면 프로젝트 주제를 사용합니다.",
+        )
+        discovery_count = st.slider("탐색할 출처 수", 1, 10, 5)
+        discover = st.form_submit_button(
+            "자동 출처 탐색 및 EvidencePack 생성",
+            use_container_width=True,
+            disabled=project.blog_output is not None or project.video_output is not None,
+        )
+
+    if discover:
+        with st.spinner("공개 출처를 검색하고 안전하게 검증하고 있습니다..."):
+            try:
+                workflow().discover_evidence(
+                    project.project_id,
+                    SourceDiscoveryRequest(
+                        query=discovery_query,
+                        count=discovery_count,
+                        search_lang=(
+                            project.language if project.language in {"ko", "en"} else "en"
+                        ),
+                    ),
+                )
+            except Exception as exc:
+                st.error(f"자동 출처 탐색 실패: {exc}")
+            else:
+                st.success("검색 후보를 검증해 EvidencePack을 만들었습니다.")
+                st.rerun()
     if research:
         urls = [line.strip() for line in source_urls.splitlines() if line.strip()]
         try:
@@ -160,6 +193,12 @@ with left:
             disabled=project.evidence_status != EvidenceStatus.approved,
         )
         video_selected = "short_video" in selected_channels
+        video_profile = st.selectbox(
+            "영상 프로필",
+            ["short", "long"],
+            help="long은 6-12분 분량의 증거 기반 장문 내레이션을 계획합니다.",
+            disabled=not video_selected,
+        )
         video_source = st.selectbox(
             "영상 소재 공급자",
             ["pexels", "pixabay", "coverr"],
@@ -203,6 +242,7 @@ with left:
         request = ContentFanoutRequest(
             channels=selected_channels,
             video_options=VideoGenerationOptions(
+                video_profile=video_profile,
                 video_source=video_source,
                 video_aspect=video_aspect,
                 voice_name=voice_name.strip(),
@@ -293,6 +333,9 @@ with right:
         ]
     )
     with evidence_tab:
+        if project.source_discovery:
+            with st.expander("자동 출처 탐색 기록"):
+                st.json(project.source_discovery.model_dump(mode="json"))
         if project.evidence_pack:
             st.subheader("검증된 출처")
             for source in project.evidence_pack.sources:

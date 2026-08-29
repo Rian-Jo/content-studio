@@ -35,7 +35,10 @@ from app.models.evidence import (
     EvidencePack,
     EvidenceStatus,
     ResearchRequest,
+    SearchResultRecord,
     SourceInput,
+    SourceDiscoveryRecord,
+    SourceDiscoveryRequest,
     SourceRecord,
     SourceVerificationStatus,
 )
@@ -48,6 +51,7 @@ from app.services.content.publication import (
 )
 from app.services.content.research import SourceResearcher, ensure_public_http_url
 from app.services.content.release import ContentReleaseService
+from app.services.content.search import BraveSearchProvider
 from app.services.content.store import ContentProjectNotFoundError, ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter
 from app.services.content.video_generator import VideoPlanGenerator
@@ -263,6 +267,31 @@ class TestMoneyPrinterVideoAdapter(unittest.TestCase):
         self.assertEqual(kwargs["params"].video_terms, output.search_terms)
         self.assertEqual(kwargs["params"].voice_name, "test-voice")
 
+    def test_long_video_profile_uses_extended_mpt_chunking(self):
+        calls = []
+        state = MemoryState()
+        payload = sample_video_payload()
+        payload["scenes"] = payload["scenes"] * 3
+        adapter = MoneyPrinterVideoAdapter(
+            plan_generator=VideoPlanGenerator(responder=lambda _: json.dumps(payload)),
+            scheduler=lambda func, **kwargs: calls.append((func, kwargs)),
+        )
+
+        with patch("app.services.content.video_adapter.sm.state", state):
+            adapter.generate(
+                approved_project(),
+                VideoGenerationOptions(
+                    video_profile="long",
+                    video_aspect="16:9",
+                    voice_name="test-voice",
+                ),
+            )
+
+        _, kwargs = calls[0]
+        self.assertEqual(kwargs["params"].paragraph_number, 6)
+        self.assertEqual(kwargs["params"].video_aspect, "16:9")
+        self.assertFalse(kwargs["allow_cross_post"])
+
     def test_refresh_collects_completed_video_files(self):
         state = MemoryState()
         output = VideoOutput.model_validate(sample_video_payload())
@@ -367,6 +396,27 @@ class PublicationSession:
         return self.responses.pop(0)
 
 
+class SearchResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class SearchSession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return SearchResponse(self.payload)
+
+
 class TestSourceResearcher(unittest.TestCase):
     def test_verifies_and_extracts_public_source(self):
         session = ResearchSession()
@@ -430,6 +480,54 @@ class TestPublicationUrlVerifier(unittest.TestCase):
             )
 
         self.assertEqual(len(session.calls), 1)
+
+
+class TestBraveSearchProvider(unittest.TestCase):
+    def test_uses_server_key_and_returns_safe_unique_results(self):
+        session = SearchSession(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "First result",
+                            "url": "https://example.com/one#section",
+                            "description": "Useful source",
+                        },
+                        {
+                            "title": "Duplicate result",
+                            "url": "https://example.com/one",
+                        },
+                        {"title": "Unsafe", "url": "http://127.0.0.1/private"},
+                    ]
+                }
+            }
+        )
+
+        def guard(url):
+            if "127.0.0.1" in url:
+                raise ValueError("unsafe")
+            return SourceInput(url=url)
+
+        provider = BraveSearchProvider(
+            api_key="server-secret", session=session, result_guard=guard
+        )
+        record = provider.search(
+            SourceDiscoveryRequest(count=5), "Evidence based content"
+        )
+
+        _, kwargs = session.calls[0]
+        self.assertEqual(
+            kwargs["headers"]["X-Subscription-Token"], "server-secret"
+        )
+        self.assertEqual(kwargs["params"]["safesearch"], "strict")
+        self.assertEqual(len(record.candidates), 1)
+        self.assertEqual(record.candidates[0].url, "https://example.com/one")
+
+    def test_requires_server_side_api_key(self):
+        provider = BraveSearchProvider(api_key="", session=SearchSession({}))
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "BRAVE_SEARCH_API_KEY"):
+                provider.search(SourceDiscoveryRequest(), "topic")
 
 
 class FakeResponse:
@@ -523,6 +621,26 @@ class FakeResearcher:
         return [sample_source()]
 
 
+class FakeSearchProvider:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, request, fallback_query):
+        self.calls.append((request, fallback_query))
+        return SourceDiscoveryRecord(
+            query=request.query or fallback_query,
+            searched_at=datetime.now(timezone.utc),
+            candidates=[
+                SearchResultRecord(
+                    rank=1,
+                    title="Discovered source",
+                    url="https://example.com/discovered",
+                    description="A safe result",
+                )
+            ],
+        )
+
+
 class FakeVideoGenerator:
     def __init__(self, error: str | None = None):
         self.error = error
@@ -575,6 +693,7 @@ class TestContentWorkflow(unittest.TestCase):
             Path(self.temp_dir.name) / "releases"
         )
         self.publication_verifier = FakePublicationVerifier()
+        self.search_provider = FakeSearchProvider()
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
@@ -585,6 +704,7 @@ class TestContentWorkflow(unittest.TestCase):
             publication_service=ContentPublicationService(
                 verifier=self.publication_verifier
             ),
+            search_provider=self.search_provider,
         )
 
     def tearDown(self):
@@ -628,6 +748,25 @@ class TestContentWorkflow(unittest.TestCase):
 
         stored = self.workflow.store.get(project.project_id)
         self.assertEqual(stored.blog_status, BlogStatus.not_started)
+
+    def test_discovers_and_verifies_sources_before_building_evidence(self):
+        project = self.workflow.create_project(
+            ContentProjectCreate(topic="Automatic source discovery")
+        )
+
+        discovered = self.workflow.discover_evidence(
+            project.project_id,
+            SourceDiscoveryRequest(query="trusted research", count=3),
+        )
+
+        self.assertEqual(discovered.evidence_status, "ready_for_review")
+        self.assertEqual(discovered.source_discovery.provider, "brave")
+        self.assertEqual(discovered.source_discovery.query, "trusted research")
+        self.assertEqual(
+            discovered.source_discovery.candidates[0].url,
+            "https://example.com/discovered",
+        )
+        self.assertEqual(self.search_provider.calls[0][1], project.topic)
 
     def test_fanout_runs_blog_and_video_from_one_evidence_pack(self):
         project = approved_project()

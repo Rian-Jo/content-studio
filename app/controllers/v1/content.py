@@ -14,7 +14,11 @@ from app.models.content import (
     PublicationObservationRequest,
     PublicationReceiptRequest,
 )
-from app.models.evidence import EvidenceApprovalRequest, ResearchRequest
+from app.models.evidence import (
+    EvidenceApprovalRequest,
+    ResearchRequest,
+    SourceDiscoveryRequest,
+)
 from app.models.exception import HttpException
 from app.services.content import ContentWorkflow
 from app.services.content.store import ContentProjectNotFoundError
@@ -89,6 +93,25 @@ def research_content_project(
 ):
     try:
         project = get_workflow().research_evidence(project_id, body)
+    except ContentProjectNotFoundError as exc:
+        raise _not_found(request, project_id) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=base.get_task_id(request), status_code=400, message=str(exc)
+        ) from exc
+    return utils.get_response(200, project.model_dump(mode="json"))
+
+
+@router.post(
+    "/content/projects/{project_id}/discover",
+    response_model=ContentProjectResponse,
+    summary="Discover public sources with Brave Search and build an EvidencePack",
+)
+def discover_content_project(
+    request: Request, project_id: str, body: SourceDiscoveryRequest
+):
+    try:
+        project = get_workflow().discover_evidence(project_id, body)
     except ContentProjectNotFoundError as exc:
         raise _not_found(request, project_id) from exc
     except ValueError as exc:

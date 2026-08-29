@@ -9,7 +9,7 @@ from app.services import llm
 
 
 VIDEO_SYSTEM_PROMPT = """
-You are a short-video editor creating a factual video plan from an approved
+You are a video editor creating a factual video plan from an approved
 EvidencePack. Return exactly one JSON object and no prose outside it. Required keys:
 title, hook, narration, scenes, search_terms, caption, hashtags,
 evidence_claim_ids. Each scene requires narration and visual_direction. The
@@ -42,7 +42,7 @@ class VideoPlanGenerator:
     def __init__(self, responder: Callable[[str], str] | None = None):
         self._responder = responder or _default_responder
 
-    def generate(self, project: ContentProject) -> VideoOutput:
+    def generate(self, project: ContentProject, profile: str = "short") -> VideoOutput:
         if (
             project.evidence_status != EvidenceStatus.approved
             or project.evidence_pack is None
@@ -67,8 +67,22 @@ class VideoPlanGenerator:
             "counterpoints": project.evidence_pack.counterpoints,
             "sources": sources,
         }
+        if profile == "long":
+            profile_instruction = (
+                "Create a 6-12 minute landscape-friendly plan with a structured "
+                "opening, 8-30 scenes, clear transitions, and a substantive "
+                "conclusion. The narration may use up to 30,000 characters."
+            )
+        else:
+            profile_instruction = (
+                "Create a concise short-form plan with 1-20 scenes and a strong "
+                "opening hook."
+            )
         prompt = f"""
 {VIDEO_SYSTEM_PROMPT}
+
+Video profile: {profile}
+{profile_instruction}
 
 Content brief:
 - Topic: {project.topic}
@@ -82,6 +96,8 @@ Content brief:
 """.strip()
         response = self._responder(prompt)
         output = VideoOutput.model_validate(_extract_json_object(response))
+        if profile == "long" and len(output.scenes) < 3:
+            raise ValueError("long-video profile requires at least three scenes")
         approved_claim_ids = {
             claim.claim_id for claim in project.evidence_pack.claims
         }

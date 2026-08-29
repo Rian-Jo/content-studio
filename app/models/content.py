@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.evidence import EvidencePack, EvidenceStatus
+from app.models.evidence import EvidencePack, EvidenceStatus, SourceDiscoveryRecord
 
 
 def utc_now() -> datetime:
@@ -106,8 +106,8 @@ class VideoScene(BaseModel):
 class VideoOutput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     hook: str = Field(min_length=1, max_length=500)
-    narration: str = Field(min_length=20, max_length=5000)
-    scenes: list[VideoScene] = Field(min_length=1, max_length=20)
+    narration: str = Field(min_length=20, max_length=30000)
+    scenes: list[VideoScene] = Field(min_length=1, max_length=60)
     search_terms: list[str] = Field(min_length=1, max_length=10)
     caption: str = Field(min_length=1, max_length=2200)
     hashtags: list[str] = Field(default_factory=list, max_length=20)
@@ -143,6 +143,7 @@ class ConsistencyReport(BaseModel):
 
 
 class VideoGenerationOptions(BaseModel):
+    video_profile: Literal["short", "long"] = "short"
     video_aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
     video_source: Literal["pexels", "pixabay", "coverr"] = "pexels"
     voice_name: str = Field(default="", max_length=300)
@@ -311,6 +312,7 @@ class ContentProjectCreate(BaseModel):
 class ContentProject(ContentProjectCreate):
     project_id: str = Field(default_factory=lambda: str(uuid4()))
     evidence_pack: EvidencePack | None = None
+    source_discovery: SourceDiscoveryRecord | None = None
     evidence_status: EvidenceStatus = EvidenceStatus.not_started
     blog_output: BlogOutput | None = None
     blog_status: BlogStatus = BlogStatus.not_started

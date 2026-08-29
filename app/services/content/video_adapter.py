@@ -47,7 +47,7 @@ class MoneyPrinterVideoAdapter:
     def generate(
         self, project: ContentProject, options: VideoGenerationOptions
     ) -> VideoOutput:
-        output = self.plan_generator.generate(project)
+        output = self.plan_generator.generate(project, options.video_profile)
         task_id = utils.get_uuid()
         params = VideoParams(
             video_subject=output.title,
@@ -61,7 +61,7 @@ class MoneyPrinterVideoAdapter:
             bgm_volume=options.bgm_volume,
             subtitle_enabled=options.subtitle_enabled,
             video_count=1,
-            paragraph_number=1,
+            paragraph_number=6 if options.video_profile == "long" else 1,
         )
         sm.state.update_task(
             task_id,

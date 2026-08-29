@@ -15,7 +15,8 @@ own output and status even when another channel has not started or has failed.
 ## Implemented in the current MVP
 
 - `ContentProject` and `BlogOutput` domain models
-- Verified collection of user-supplied public HTTP/HTTPS source URLs
+- Verified collection of user-supplied public HTTP/HTTPS source URLs and optional
+  automatic discovery through the server-side Brave Search API
 - `EvidencePack` records with claim-to-source links and a manual approval gate
 - Local SQLite project-state storage
 - An independent `BlogWorkflow` that generates only from approved evidence and
@@ -23,6 +24,8 @@ own output and status even when another channel has not started or has failed.
 - Independent blog/short-video fan-out from the same approved `EvidencePack`
 - A `MoneyPrinterVideoAdapter` that submits evidence-derived narration and search
   terms to the existing MoneyPrinterTurbo task queue
+- Short and 6-12 minute long-video planning profiles using the same isolated MPT
+  renderer with cross-posting disabled
 - Per-channel status and LLM request records, plus deterministic claim/number
   consistency checks across blog and video drafts
 - A unified manual review record bound to the exact evidence/output snapshot with
@@ -36,13 +39,13 @@ own output and status even when another channel has not started or has failed.
 - A dedicated Streamlit Content Studio screen
 - REST endpoints for creating, listing, reading, and generating content projects
 
-Automatic source discovery and search-provider integrations are **not implemented**;
-the current research step verifies URLs supplied by the user. Exact token and cost
-amounts remain unavailable when the configured LLM adapter does not report usage;
+Automatic source discovery uses Brave Search when `BRAVE_SEARCH_API_KEY` is set;
+manual source URLs remain available without it. Exact token and cost amounts remain
+unavailable when the configured LLM adapter does not report usage;
 Content Studio records this explicitly instead of inventing an estimate. Other
-roadmap items not implemented yet are long-video profiles, newsletter and social
-workflows, public or scheduled publishing, external video publishing, and
-provider-connected automatic analytics.
+roadmap items not implemented yet are newsletter and social workflows, public or
+scheduled publishing, external video publishing, and provider-connected automatic
+analytics.
 
 ## Run Content Studio locally
 
@@ -58,14 +61,18 @@ Blog generation uses the LLM provider configured locally for MoneyPrinterTurbo.
 The local `config.toml`, generated content, SQLite state, logs, caches, and virtual
 environment are excluded from Git.
 
+Optional discovery reads `BRAVE_SEARCH_API_KEY` only from the server environment.
+The key is never stored in project records, SQLite, Streamlit state, or release
+bundles.
+
 The Content Studio flow is:
 
 ```text
 Create project
-  -> submit public source URLs
+  -> submit public source URLs or discover them with Brave Search
   -> verify sources and build claim-to-source links
   -> review and approve the EvidencePack
-  -> independently generate a blog draft and/or MPT short video
+  -> independently generate a blog draft and/or MPT short/long video
   -> review channel status and the consistency report
   -> approve the exact output snapshot or request changes
   -> create a local release plan and checksummed ZIP handoff package

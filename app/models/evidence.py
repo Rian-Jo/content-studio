@@ -69,6 +69,40 @@ class ResearchRequest(BaseModel):
         return self
 
 
+class SourceDiscoveryRequest(BaseModel):
+    query: str | None = Field(default=None, max_length=400)
+    count: int = Field(default=5, ge=1, le=10)
+    country: str = Field(default="US", min_length=2, max_length=2)
+    search_lang: str = Field(default="en", min_length=2, max_length=10)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str | None) -> str | None:
+        normalized = " ".join((value or "").split())
+        return normalized or None
+
+    @field_validator("country")
+    @classmethod
+    def normalize_country(cls, value: str) -> str:
+        if not value.isalpha():
+            raise ValueError("country must use a two-letter code")
+        return value.upper()
+
+
+class SearchResultRecord(BaseModel):
+    rank: int = Field(ge=1, le=20)
+    title: str = Field(min_length=1, max_length=300)
+    url: str = Field(min_length=1, max_length=2048)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class SourceDiscoveryRecord(BaseModel):
+    provider: Literal["brave"] = "brave"
+    query: str = Field(min_length=1, max_length=400)
+    searched_at: datetime
+    candidates: list[SearchResultRecord] = Field(min_length=1, max_length=10)
+
+
 class SourceRecord(BaseModel):
     source_id: str = Field(default_factory=lambda: str(uuid4()))
     requested_url: str = Field(max_length=2048)

@@ -6,8 +6,10 @@ video task exists.
 
 ## Evidence workflow
 
-The current research step accepts up to 10 user-supplied public HTTP/HTTPS URLs. It
-does not discover sources automatically. For each URL, the server:
+The research step accepts up to 10 user-supplied public HTTP/HTTPS URLs or can
+discover candidates through Brave Search when `BRAVE_SEARCH_API_KEY` is configured.
+Search snippets are not treated as evidence. The server removes duplicate and
+unsafe candidate URLs, then applies the same process to every selected URL:
 
 1. rejects credential-bearing, local, private, link-local, and other non-public
    targets, including redirect targets;
@@ -20,6 +22,9 @@ does not discover sources automatically. For each URL, the server:
 The resulting `EvidencePack` remains `ready_for_review` until a person approves it.
 Blog generation is rejected before approval. Source excerpts are explicitly marked
 as untrusted reference data in LLM prompts to reduce prompt-injection risk.
+
+The Brave key is read only from the server environment and is never stored in a
+project, SQLite payload, Streamlit state, or release bundle.
 
 ## Independent channel fan-out
 
@@ -46,6 +51,10 @@ MPT render does not make another script/term LLM request. It passes
 `allow_cross_post=False`, ensuring a Content Studio render never inherits automatic
 YouTube, TikTok, or Instagram upload settings. Rendering may still call configured
 TTS and material-provider APIs and can incur their normal costs.
+
+The `short` profile keeps a compact 1-20 scene plan. The `long` profile requests a
+structured 6-12 minute, 8-30 scene plan, allows longer narration, and asks MPT to
+process six paragraph units. Both profiles force `allow_cross_post=False`.
 
 When both drafts exist, a deterministic consistency report compares used evidence
 claim IDs and flags numbers that do not occur in any approved claim. This is a
@@ -121,6 +130,7 @@ REST endpoints:
 ```text
 POST /api/v1/content/projects
 POST /api/v1/content/projects/{project_id}/research
+POST /api/v1/content/projects/{project_id}/discover
 POST /api/v1/content/projects/{project_id}/evidence/approve
 POST /api/v1/content/projects/{project_id}/fanout
 POST /api/v1/content/projects/{project_id}/video/refresh

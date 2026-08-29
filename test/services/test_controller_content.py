@@ -20,8 +20,9 @@ from app.services.content import (
 
 from test.services.test_content_studio import (
     FakeEvidenceBuilder,
-    FakeResearcher,
     FakePublicationVerifier,
+    FakeResearcher,
+    FakeSearchProvider,
     FakeVideoGenerator,
     sample_blog_payload,
 )
@@ -38,6 +39,7 @@ class TestContentControllerHTTP(unittest.TestCase):
             Path(self.temp_dir.name) / "releases"
         )
         self.publication_verifier = FakePublicationVerifier()
+        self.search_provider = FakeSearchProvider()
         self.workflow = ContentWorkflow(
             store=store,
             blog_generator=generator,
@@ -48,6 +50,7 @@ class TestContentControllerHTTP(unittest.TestCase):
             publication_service=ContentPublicationService(
                 verifier=self.publication_verifier
             ),
+            search_provider=self.search_provider,
         )
         self.original_workflow = content_controller._workflow
         content_controller._workflow = self.workflow
@@ -93,6 +96,26 @@ class TestContentControllerHTTP(unittest.TestCase):
         self.assertEqual(generated.status_code, 200)
         self.assertEqual(generated.json()["data"]["blog_status"], "draft_complete")
         self.assertEqual(fetched.json()["data"]["blog_output"]["slug"], "useful-guide")
+
+    def test_automatic_source_discovery_endpoint(self):
+        created = self.client.post(
+            "/api/v1/content/projects",
+            json={"topic": "Discover evidence", "requested_channels": ["blog"]},
+        )
+        project_id = created.json()["data"]["project_id"]
+
+        response = self.client.post(
+            f"/api/v1/content/projects/{project_id}/discover",
+            json={"query": "trusted sources", "count": 3},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["data"]["evidence_status"], "ready_for_review"
+        )
+        self.assertEqual(
+            response.json()["data"]["source_discovery"]["provider"], "brave"
+        )
 
     def test_fanout_and_video_refresh_endpoints(self):
         created = self.client.post(

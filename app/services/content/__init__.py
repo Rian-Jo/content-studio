@@ -7,6 +7,7 @@ from app.services.content.publication import (
 from app.services.content.research import SourceResearcher
 from app.services.content.release import ContentReleaseService
 from app.services.content.review import ContentReviewService
+from app.services.content.search import BraveSearchProvider
 from app.services.content.store import ContentStore
 from app.services.content.video_adapter import MoneyPrinterVideoAdapter
 from app.services.content.video_generator import VideoPlanGenerator
@@ -14,6 +15,7 @@ from app.services.content.workflow import ContentWorkflow
 
 __all__ = [
     "BlogGenerator",
+    "BraveSearchProvider",
     "ContentStore",
     "ContentWorkflow",
     "ContentReviewService",
